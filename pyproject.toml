@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiered-browser-engine"
+version = "0.3.0"
+description = "Token-saving tiered browser automation with an MCP server"
+requires-python = ">=3.10"
+dependencies = [
+  "playwright>=1.45",
+  "openai>=1.30",
+  "anthropic>=0.30",
+  "mcp>=1.10,<2",
+]
+
+[project.scripts]
+browser-engine = "browser_engine.cli:main"
+browser-engine-mcp = "browser_engine.mcp_server:main"
+
+[tool.setuptools]
+packages = ["browser_engine"]
