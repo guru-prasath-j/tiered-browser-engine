@@ -1,0 +1,7 @@
+{
+  "steps": [
+    {"intent": "type into the search box", "value": "flutter developer"},
+    {"intent": "press enter to search", "value": null},
+    {"intent": "click the first job result", "value": null}
+  ]
+}
