@@ -86,10 +86,23 @@ def _norm(s):
     return re.sub(r"\s+", " ", str(s or "")).strip().lower()
 
 
+# Actions whose result is read straight off the element. For these the element's own state is
+# the truth; a model's guess about the URL or visible text afterwards is ignored.
+ELEMENT_CHECKED = {"type", "select", "check", "uncheck", "upload"}
+
+
+def url_has(url, part):
+    """Case-insensitive, and a space in the guess may be '_', '-', '+' or '%20' in the URL."""
+    u = str(url or "").lower()
+    p = str(part or "").strip().lower()
+    return any(v in u for v in {p, p.replace(" ", "_"), p.replace(" ", "-"), p.replace(" ", "+"),
+                                 p.replace(" ", "%20")})
+
+
 def verify(page, action, before, loc, text, expect, max_elements):
     """Returns (ok, reason). Element-level checks first, then 'did the page change'."""
-    expect = expect or {}
-    if expect.get("url_contains") and expect["url_contains"] not in page.url:
+    expect = {} if action in ELEMENT_CHECKED else (expect or {})
+    if expect.get("url_contains") and not url_has(page.url, expect["url_contains"]):
         return False, f"expected URL to contain {expect['url_contains']!r}, got {page.url}"
     if expect.get("text_visible"):
         try:
@@ -134,3 +147,38 @@ def verify(page, action, before, loc, text, expect, max_elements):
     if expect.get("url_contains") or expect.get("text_visible"):
         return True, "ok (expectation met)"
     return False, "page did not change after the action"
+
+
+# ---- wrong-target guard ------------------------------------------------------
+# "Did the page change?" can't tell a right click from a wrong one: clicking any link changes the
+# page. When the intent names its target by label ("click the new link") and an element with
+# exactly that label is on the page, a click on an element whose label shares no word with the
+# intent is almost certainly the model picking the wrong ref, so it is rejected and retried.
+TARGET_FILLER = {
+    "click", "tap", "press", "open", "select", "choose", "go", "hit", "follow", "the", "a", "an", "on",
+    "in", "into", "of", "to", "at", "from", "for", "with", "its", "that", "this", "link", "button",
+    "tab", "menu", "item", "option", "icon", "bar", "top", "bottom", "nav", "navigation", "header",
+    "footer", "sidebar", "side", "left", "right", "page", "category", "section", "label", "labelled",
+    "labeled", "called", "named", "entry", "card", "row",
+}
+GENERIC = {"first", "second", "third", "last", "next", "previous", "result", "results", "listing",
+           "one", "any"}
+
+
+def _words(s):
+    return re.findall(r"[a-z0-9]+", str(s or "").lower())
+
+
+def wrong_target(intent, chosen, elements):
+    """(chosen, better) if a clearly better-labelled element exists, else None."""
+    words = [w for w in _words(intent) if w not in TARGET_FILLER]
+    named = [w for w in words if w not in GENERIC]
+    if not named or chosen is None:
+        return None
+    if set(_words(chosen.name)) & set(words):
+        return None
+    phrases = {" ".join(named[i:j]) for i in range(len(named)) for j in range(i + 1, len(named) + 1)}
+    for e in elements:
+        if e is not chosen and " ".join(_words(e.name)) in phrases:
+            return chosen, e
+    return None

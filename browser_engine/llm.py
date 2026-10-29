@@ -17,7 +17,7 @@ Actions:
 - navigate: "text" is an absolute URL.
 - wait: "text" is milliseconds.
 - back: go to the previous page; no ref.
-- extract: read data. "ref" is the element inside the card or section to read (e.g. the title link of a listing); the engine returns the text around it.
+- extract: read data. "ref" is an element INSIDE the content to read (e.g. the title link of the first listing, or a link in the first paragraph); the engine returns the text around it. Never pick navigation, tag clouds, sidebars, headers or result counts unless the intent asks for them.
 - done: the intent is ALREADY satisfied on the current page.
 - fail: the intent cannot be done on this page; say why in "reason".
 "expect" is optional; fill it only when you are sure what the page shows afterwards.

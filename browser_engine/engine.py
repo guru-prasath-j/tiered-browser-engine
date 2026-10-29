@@ -7,7 +7,7 @@ import uuid
 from collections import Counter
 
 from .cache import norm_intent
-from .executor import NEEDS_ELEMENT, VALUE_ACTIONS, extract_text, locate_cached, perform, verify
+from .executor import NEEDS_ELEMENT, VALUE_ACTIONS, extract_text, locate_cached, perform, verify, wrong_target
 from .llm import Usage, parse_json
 from .observer import observe, page_key
 from .safety import describe
@@ -203,6 +203,12 @@ class Engine:
             if not ref or ref not in obs.by_ref:
                 return False, f"ref {ref!r} is not in the element list", None
             loc = self.page.locator(f'[data-be-ref="{ref}"]')
+        if action == "click":
+            miss = wrong_target(self.intent, obs.by_ref.get(ref), obs.elements)
+            if miss:
+                picked, better = miss
+                return False, (f'picked {picked.ref} "{picked.name[:40]}", but {better.ref} '
+                               f'"{better.name[:40]}" matches the intent'), None
         if self.guard:
             self.guard.check(self.intent, action, text, describe(loc))  # raises Blocked
         if action == "extract":

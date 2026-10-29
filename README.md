@@ -8,6 +8,36 @@ cache (0 tokens) -> local LLM (free) -> Claude text (~4k) -> Claude vision (~7k)
 
 Pages are read as a pruned list of interactive elements (text), not screenshots. Results are checked with DOM assertions, not "take a screenshot and ask if it worked". Screenshots are only used by the last tier.
 
+## Measured results
+
+**Real use (my Mac, qwen2.5:7b, Claude API tier off):** 20 runs, 24 steps. 17 succeeded, 0 Claude
+tokens used, 13,943 free local-model tokens, against roughly 255,000 tokens for a screenshot-only
+agent (15k per step, estimated).
+
+**Benchmark (`bench/`).** Six read-only tasks on public sites (quotes.toscrape, books.toscrape,
+Wikipedia, Hacker News, pub.dev, httpbin), scored against ground truth: the final URL, the text
+actually read, and form field values. It does not trust the engine's own "ok".
+
+| Engine version | Pass | Engine said ok | Actually correct |
+|---|---|---|---|
+| before the verifier fixes | cold | 4/6 | 1/6 |
+| before the verifier fixes | warm (3 tasks rerun) | 3/3 | 0/3 |
+
+What the benchmark found, and what changed:
+
+- **False failures.** The step check trusted the model's guess about the URL, case-sensitively and even
+  for typing. "Travel" didn't match `.../travel_2/`, and typing into Wikipedia's search box never
+  changes the URL. Now typing, select and checkbox steps are judged by the field's actual value, and
+  URL checks ignore case and separators.
+- **False passes.** A click counted as done if *anything* on the page changed. On Hacker News, "click
+  the new link" opened a story's site link instead, passed, and was cached, so every later run
+  replayed the wrong click for free. Now, if the intent names its target and an element with exactly
+  that label is on the page, a click on an unrelated element is rejected and retried with feedback.
+- **Wrong region read.** Read steps sometimes picked a tag cloud or a results header. The prompt now
+  steers read steps to an element inside the content; the benchmark tracks whether that is enough.
+
+Run it yourself: `python bench/run.py` (cold pass, then warm; writes `bench/results.json`).
+
 ## Setup (macOS)
 
 ```bash
