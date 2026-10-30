@@ -33,6 +33,14 @@ class Config:
     # Wait after each action for the page to settle (ms)
     settle_ms: int = 800
 
+    # Popups: close cookie banners / Google One Tap / "sign in to save" boxes before steps (0 tokens).
+    dismiss_popups: bool = field(default_factory=lambda: _env("BE_DISMISS_POPUPS", "1") != "0")
+    popup_wait_ms: int = 600  # popups usually appear just after a page loads
+
+    # Bot checks: how long one tool call waits for the user to solve a captcha before handing
+    # back needs_human. Keep under the ~60s Cowork device-call timeout.
+    human_wait_s: int = field(default_factory=lambda: int(_env("BE_HUMAN_WAIT", "30")))
+
     @property
     def cache_path(self):
         return os.path.join(self.data_dir, "cache.sqlite")
@@ -40,6 +48,10 @@ class Config:
     @property
     def log_path(self):
         return os.path.join(self.data_dir, "steps.jsonl")
+
+    @property
+    def popups_path(self):
+        return os.path.join(self.data_dir, "popups.json")
 
     @property
     def profile_dir(self):

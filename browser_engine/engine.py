@@ -7,6 +7,8 @@ import uuid
 from collections import Counter
 
 from .cache import norm_intent
+from . import human
+from . import popups as popup_mod
 from .executor import NEEDS_ELEMENT, VALUE_ACTIONS, extract_text, locate_cached, perform, verify, wrong_target
 from .llm import Usage, parse_json
 from .observer import observe, page_key
@@ -21,6 +23,14 @@ class StepFailed(Exception):
 
 class BudgetExceeded(Exception):
     pass
+
+
+class HumanNeeded(Exception):
+    """A bot check is on screen and the user didn't clear it within human_wait_s."""
+
+    def __init__(self, reason, resume_url=None):
+        super().__init__(f"{reason}: waiting for the user to solve it in Chrome")
+        self.reason, self.resume_url = reason, resume_url
 
 
 class StepLog:
@@ -54,19 +64,27 @@ def normalize_steps(steps):
 
 
 class Engine:
-    def __init__(self, page, cfg, cache, log, local=None, claude=None, guard=None):
+    guest_popups = False  # GuestEngine also clicks "continue as guest"
+
+    def __init__(self, page, cfg, cache, log, local=None, claude=None, guard=None, popups=None):
         self.page, self.cfg, self.cache, self.log = page, cfg, cache, log
         self.local, self.claude, self.guard = local, claude, guard
+        self.popups = popups         # PopupMemory, or None to never touch popups
+        self.popups_closed = []      # labels clicked this run, returned to the caller
+        self._popup_url = None
         self.intent = ""
         self.extracted = []  # [{"intent", "text"}] from extract steps, returned to the caller
         self.local_down = False
         self.claude_tokens = 0
         self.tiers_used = Counter()
+        self.target_url = None   # where the plan meant to be; revisited after a bot check redirects away
+        self.human_waits = 0
 
     # ---- public ----------------------------------------------------------
     def run(self, goal, start_url=None, plan=None):
         t0 = time.time()
         if start_url:
+            self.target_url = start_url
             self.page.goto(start_url, wait_until="domcontentloaded")
         key = plan_key(goal, start_url)
         steps = normalize_steps(plan) if plan else self._get_plan(goal, key)
@@ -88,6 +106,8 @@ class Engine:
     def do_step(self, intent, value=None):
         key = norm_intent(intent)
         self.intent = intent
+        self.human_gate()
+        self.before_step()
         t0 = time.time()
         before = observe(self.page, self.cfg.max_elements)
         domain, pkey = page_key(before.url)
@@ -104,6 +124,14 @@ class Engine:
                 return self._done(key, "cache", t0)
             self.cache.fail(domain, hit_page, key)
             feedback = f"a previously working action failed here: {why}"
+            if self.clear_popups(force=True):  # something may have been covering the target
+                before = observe(self.page, self.cfg.max_elements)
+                ok, why = self._replay(entry, value, before)
+                self.log.write("attempt", intent=key, tier="cache", ok=ok, note=f"after closing popup: {why}",
+                               tokens_in=0, tokens_out=0)
+                if ok:
+                    self.cache.hit(domain, hit_page, key)
+                    return self._done(key, "cache", t0)
 
         # Tiers 1-3: ask models, cheapest first.
         for tier, tries in self._tiers():
@@ -159,6 +187,46 @@ class Engine:
 
         self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000))
         raise StepFailed(f"could not complete step '{intent}': {feedback}")
+
+    def before_step(self):
+        """Runs before every step. Closes optional popups once per newly loaded page."""
+        self.clear_popups()
+
+    def clear_popups(self, force=False):
+        """Close optional popups (0 tokens). Only on a new URL unless forced. True if any closed."""
+        if self.popups is None:
+            return False
+        url = self.page.url
+        if not force and url == self._popup_url:
+            return False
+        if not force and self.cfg.popup_wait_ms:
+            self.page.wait_for_timeout(self.cfg.popup_wait_ms)  # most popups appear right after load
+        self._popup_url = url
+        r = popup_mod.dismiss(self.page, self.popups, guest=self.guest_popups)
+        closed = r["clicked"] + (["google one tap"] if r["removed_google_one_tap"] else [])
+        if closed:
+            self.popups_closed += closed
+            self.log.write("popup", intent=norm_intent(self.intent), closed=closed, url=url)
+            self._popup_url = self.page.url
+        return bool(closed)
+
+    def human_gate(self):
+        """If a bot check is showing, hand over to the user and resume when it's gone."""
+        for _ in range(2):  # solve -> redirected to home -> reopen target -> maybe one more check
+            reason = human.detect(self.page)
+            if not reason:
+                return
+            self.human_waits += 1
+            self.log.write("human", intent=norm_intent(self.intent), note=reason, url=self.page.url)
+            human.notify(self.page, reason)
+            if not human.wait_until_clear(self.page, self.cfg.human_wait_s):
+                raise HumanNeeded(reason, self.target_url)
+            self.log.write("human", intent=norm_intent(self.intent), note="cleared by user", url=self.page.url)
+            # PerimeterX & co. often bounce to "/" after solving: go back to where the plan was.
+            if self.target_url and not human.same_target(self.page.url, self.target_url):
+                self.page.goto(self.target_url, wait_until="domcontentloaded")
+        if human.detect(self.page):
+            raise HumanNeeded("bot check keeps coming back", self.target_url)
 
     # ---- internals -------------------------------------------------------
     def _get_plan(self, goal, key):

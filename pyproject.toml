@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tiered-browser-engine"
-version = "0.3.0"
-description = "Token-saving tiered browser automation with an MCP server"
+version = "0.4.0"
+description = "Token-saving tiered browser automation with an MCP server and an A2A (Google ADK) agent"
 requires-python = ">=3.10"
 dependencies = [
   "playwright>=1.45",
@@ -14,9 +14,13 @@ dependencies = [
   "mcp>=1.10,<2",
 ]
 
+[project.optional-dependencies]
+a2a = ["google-adk[a2a]>=2.11", "litellm>=1.70", "uvicorn>=0.30"]
+
 [project.scripts]
 browser-engine = "browser_engine.cli:main"
 browser-engine-mcp = "browser_engine.mcp_server:main"
+browser-engine-a2a = "browser_engine.a2a_agent:main"
 
 [tool.setuptools]
 packages = ["browser_engine"]

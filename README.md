@@ -104,6 +104,17 @@ fallback through `do_browser_step`, so no API key is needed. Set `BE_ALLOW_CLAUD
   `confirm_irreversible=true`, which Claude is told to set only after you approve in chat.
 - The server opens its own tab in your Chrome and never touches the tab you're using.
 
+### Popups (0 tokens)
+
+Before the first step on every newly loaded page, the engine closes optional popups with plain DOM
+clicks: Google One Tap ("Sign in with Google") is removed, and cookie banners, "get the app" bars and
+newsletter boxes are closed with their close / reject / accept / "not now" button. The button that
+worked is saved per site in `~/.browser_engine/popups.json` and tried first next time. If a cached
+step fails, popups are checked once more and the step is retried before any model is asked.
+It never clicks anything that signs in, subscribes, buys or submits, and dialogs that your plan opened
+itself (filters, date pickers) are left alone. Turn it off with `BE_DISMISS_POPUPS=0`.
+Results include `popups_closed`, and `browser_cache` lists the learned buttons.
+
 ## CLI usage
 
 The same engine also works from the terminal.
@@ -168,6 +179,70 @@ Environment variables: `BE_LOCAL_BASE_URL`, `BE_LOCAL_MODEL`, `BE_CLAUDE_TEXT_MO
 | `safety.py` | Blocks secrets and unconfirmed irreversible actions before they run. |
 | `service.py` | Stateful browser session used by the MCP tools. |
 | `mcp_server.py` | MCP server (stdio); runs all browser work on one worker thread. |
+| `popups.py` | Closes optional popups with DOM clicks and remembers the working button per site. |
+| `guest.py` | Guest mode for remote callers: isolated browser, URL policy, login-wall stop. |
+| `a2a_agent.py` | Google ADK agent + A2A server with bearer auth. |
+
+## Share it as an A2A agent (Google ADK)
+
+`browser-engine-a2a` serves the engine as an [A2A](https://a2a-protocol.org) agent built with Google
+ADK, so a friend on your Tailscale can use it from any A2A client (ADK, LangGraph, a script). They send
+one sentence, get a short answer, and spend almost no tokens: planning and page reading run here on
+your local Ollama model.
+
+It always runs in **guest mode**, so a remote caller can never act as you:
+
+| Guest mode | Why |
+|---|---|
+| Own Chromium with an empty profile, thrown away after every task | Never your Chrome on :9222, never your logins or cookies |
+| Login walls stop the task with `login_required` (sign-in redirect, or a password box still showing after popups are closed) | Login-only sites are not available remotely |
+| Optional "sign in to save" popups are skipped ("continue as guest", ✕, "not now") | Most sites work without an account |
+| localhost, 10.x / 192.168.x / 172.16.x, Tailscale 100.x, `*.local`, `*.ts.net`, `file://` blocked for every request | The agent can't be used to reach your LAN or Mac |
+| Submit / pay / send / book / apply always blocked; password, OTP and card fields always refused | No one can approve them remotely |
+| Captchas reported, never waited on; uploads and cache admin disabled | Nobody at your Mac is solving them |
+| Bearer token on every request (the agent card is public); one task at a time | Only people you gave the token to |
+
+### Run it (your Mac)
+
+```bash
+cd ~/tiered-browser-engine && source .venv/bin/activate
+pip install -e ".[a2a]"
+python -m playwright install chromium        # guest browser
+OLLAMA_CONTEXT_LENGTH=8192 ollama serve       # in another terminal
+browser-engine-a2a                            # binds to your Tailscale IP, port 8765
+browser-engine-a2a --show-token               # send this to your friend privately
+```
+
+Options: `--host`, `--port`, or `BE_A2A_HOST`, `BE_A2A_PORT`. Planning model: `BE_A2A_MODEL`
+(default `ollama_chat/qwen2.5:7b`; `gemini-2.5-flash` uses `GOOGLE_API_KEY` on the free tier and plans
+more reliably). Limit sites with `BE_GUEST_ALLOW_DOMAINS=skyscanner.co.in,amazon.in` or block some with
+`BE_GUEST_BLOCK_DOMAINS`. `BE_GUEST_HEADLESS=0` shows the guest window. A new token: delete
+`~/.browser_engine/a2a_token` and restart.
+
+### Use it (your friend)
+
+```bash
+export BE_A2A_URL=http://100.x.y.z:8765 BE_A2A_TOKEN=...
+python examples/a2a_client.py "cheapest BLR to DEL flight on 5 Nov on skyscanner.co.in"
+```
+
+From his own ADK agent:
+
+```python
+import httpx
+from google.adk.agents import LlmAgent
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+
+browser = RemoteA2aAgent(
+    name="guru_browser",
+    agent_card="http://100.x.y.z:8765/.well-known/agent-card.json",
+    httpx_client=httpx.AsyncClient(headers={"Authorization": "Bearer <token>"}, timeout=600),
+)
+root_agent = LlmAgent(name="assistant", model="gemini-2.5-flash", sub_agents=[browser],
+                      instruction="Hand any web browsing task to guru_browser.")
+```
+
+For sites that need *his* login, he runs his own copy of this repo (MCP or A2A) on his own machine.
 
 ## Limitations
 
@@ -177,6 +252,7 @@ The observer does not look inside iframes or shadow DOM yet, so those pages fall
 
 ```bash
 python tests/test_engine.py && python tests/test_mcp.py && python tests/test_extract.py
+python tests/test_guest.py   # popups, guest mode, A2A server (needs .[a2a])
 ```
 
 The live tests use a fake local model on a local HTML page, so no Ollama or API key is needed. They check that the first run learns every step and the second replays all of them from the cache, that a broken cached selector heals, that the safety rules block password fields and unconfirmed submits, that a step Claude teaches through `do_browser_step` becomes a free cache hit, and that the MCP server registers all six tools.

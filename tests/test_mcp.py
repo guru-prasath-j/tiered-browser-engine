@@ -117,7 +117,7 @@ def test_mcp_server_registration():
     async def go():
         tools = {t.name: t for t in await mcp_server.mcp.list_tools()}
         assert set(tools) == {"browser_status", "run_browser_plan", "get_page_elements",
-                              "do_browser_step", "browser_token_report", "browser_cache"}
+                              "do_browser_step", "browser_token_report", "browser_cache", "wait_for_human"}
         schema = tools["run_browser_plan"].inputSchema
         assert "steps" in schema["required"]
         os.environ["BE_DATA_DIR"] = tempfile.mkdtemp()

@@ -10,9 +10,11 @@ import urllib.request
 
 from .cache import ActionCache, norm_intent
 from .config import Config
-from .engine import BudgetExceeded, Engine, StepFailed, StepLog, normalize_steps
+from . import human
+from .engine import BudgetExceeded, Engine, HumanNeeded, StepFailed, StepLog, normalize_steps
 from .observer import observe, page_key
 from .report import print_report, summarize  # noqa: F401  (print_report kept for CLI parity)
+from .popups import PopupMemory
 from .safety import Blocked, Guard
 
 STOP = {"the", "a", "an", "to", "into", "in", "on", "of", "and", "for", "click", "type", "select",
@@ -27,26 +29,57 @@ def _http_ok(url, timeout=2):
         return False
 
 
+LOAD_MORE = re.compile(r"\b(show|load|see|view) (\d+ )?more\b|more results|next page|^next$", re.I)
+
+
+def _words(text):
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def _score(e, words):
+    return 3 * len(words & _words(f"{e.name} {e.role}")) + (1 if e.in_view else 0)
+
+
 def relevant_elements(obs, query, limit=30):
     """Top `limit` elements most related to `query`, kept in page order. Keeps tool output small."""
-    words = set(re.findall(r"[a-z0-9]+", (query or "").lower())) - STOP
-    scored = []
-    for idx, e in enumerate(obs.elements):
-        name = set(re.findall(r"[a-z0-9]+", f"{e.name} {e.role}".lower()))
-        score = 3 * len(words & name) + (1 if e.in_view else 0)
-        scored.append((score, idx, e))
+    words = _words(query) - STOP
+    scored = [(_score(e, words), idx, e) for idx, e in enumerate(obs.elements)]
     top = sorted(scored, key=lambda t: (-t[0], t[1]))[:limit]
     return [e.line() for _, _, e in sorted(top, key=lambda t: t[1])]
 
 
-def compact_page(obs, query="", limit=30):
-    return {
+def coverage(obs, query, limit, max_elements=150):
+    """Tell the caller what it did NOT see, so a partial list is never mistaken for the whole page."""
+    words = _words(query) - STOP
+    out = {}
+    if words:
+        matching = [e for e in obs.elements if _score(e, words) >= 3]
+        shown = min(len(matching), limit)
+        out["matching"] = len(matching)
+        if len(matching) > shown:
+            out["matching_not_shown"] = len(matching) - shown
+    more = [e.line() for e in obs.elements if LOAD_MORE.search(e.name or "")][:3]
+    if more:
+        out["load_more"] = more
+    if len(obs.elements) >= max_elements:
+        out["page_list_capped"] = True
+    if out.get("matching_not_shown") or more or out.get("page_list_capped"):
+        out["warning"] = ("You are NOT seeing every result. Before calling anything the cheapest, "
+                          "lowest, best or 'all', raise limit, use the site's own sort/filter or "
+                          "summary view, or click the load-more control and read again.")
+    return out
+
+
+def compact_page(obs, query="", limit=30, max_elements=150):
+    page = {
         "url": obs.url,
         "title": obs.title,
         "headings": obs.headings,
         "elements": relevant_elements(obs, query, limit),
         "total_elements": len(obs.elements),
     }
+    page.update(coverage(obs, query, limit, max_elements))
+    return page
 
 
 class BrowserService:
@@ -54,6 +87,7 @@ class BrowserService:
         self.cfg = cfg or Config()
         os.makedirs(self.cfg.data_dir, exist_ok=True)
         self.cache = ActionCache(self.cfg.cache_path)
+        self.popups = PopupMemory(self.cfg.popups_path) if self.cfg.dismiss_popups else None
         self.cdp = os.getenv("BE_CDP", "http://localhost:9222")
         self.page_factory = page_factory
         self.page = None
@@ -129,7 +163,7 @@ class BrowserService:
 
     def _engine(self, page, log, confirm_irreversible):
         return Engine(page, self.cfg, self.cache, log, local=self._get_local(),
-                      claude=self._get_claude(), guard=Guard(confirm_irreversible))
+                      claude=self._get_claude(), guard=Guard(confirm_irreversible), popups=self.popups)
 
     # ---- tools -----------------------------------------------------------
     def status(self):
@@ -165,12 +199,30 @@ class BrowserService:
         log = StepLog(self.cfg.log_path)
         eng = self._engine(page, log, confirm_irreversible)
         if start_url:
+            eng.target_url = start_url
             page.goto(start_url, wait_until="domcontentloaded")
         done = 0
         try:
             for st in steps:
                 eng.do_step(st["intent"], st["value"])
                 done += 1
+        except HumanNeeded as e:
+            log.write("run", ok=False, goal=goal, completed=done, needs_human=True,
+                      tiers=dict(eng.tiers_used), claude_tokens=eng.claude_tokens)
+            return {
+                "ok": False,
+                "needs_human": True,
+                "challenge": e.reason,
+                "completed": done,
+                "remaining_steps": steps[done:],
+                "resume_url": e.resume_url,
+                "extracted": eng.extracted,
+                "url": page.url,
+                "next": ("A bot check (captcha / 'press and hold') is open in the user's Chrome and the tab "
+                         "was brought to the front. Tell the user to solve it there, then call wait_for_human "
+                         "with resume_url, then run_browser_plan with remaining_steps and NO start_url. "
+                         "Never try to solve it yourself."),
+            }
         except (Blocked, StepFailed, BudgetExceeded) as e:
             failed = steps[done]
             self.last_obs = observe(page, self.cfg.max_elements)
@@ -185,8 +237,9 @@ class BrowserService:
                 "failed_step": failed,
                 "remaining_steps": steps[done + 1:],
                 "tiers": dict(eng.tiers_used),
+                "popups_closed": eng.popups_closed,
                 "extracted": eng.extracted,
-                "page": compact_page(self.last_obs, failed["intent"], 25),
+                "page": compact_page(self.last_obs, failed["intent"], 25, self.cfg.max_elements),
                 "next": (
                     "Ask the user to approve or do this step themselves. If they approve an irreversible "
                     "step, call do_browser_step with confirm_irreversible=true."
@@ -195,6 +248,8 @@ class BrowserService:
                     "run_browser_plan with remaining_steps. If the plan itself was wrong, fix it instead."
                 ),
             }
+        if eng.human_waits:
+            log.write("human", note=f"resumed after {eng.human_waits} bot check(s)")
         log.write("run", ok=True, goal=goal, steps=len(steps), tiers=dict(eng.tiers_used),
                   claude_tokens=eng.claude_tokens)
         return {
@@ -202,15 +257,36 @@ class BrowserService:
             "steps": len(steps),
             "tiers": dict(eng.tiers_used),
             "claude_api_tokens": eng.claude_tokens,
+            "human_checks_solved": eng.human_waits,
+            "popups_closed": eng.popups_closed,
             "extracted": eng.extracted,
             "url": page.url,
             "title": page.title(),
         }
 
+    def wait_human(self, timeout_s=50, resume_url=None):
+        """Wait for the user to clear a bot check, then optionally reopen resume_url."""
+        page = self._get_page()
+        self.last_obs = None
+        reason = human.detect(page)
+        if reason:
+            human.notify(page, reason)
+            if not human.wait_until_clear(page, max(5, min(int(timeout_s), 55))):
+                return {"resolved": False, "challenge": reason, "url": page.url,
+                        "next": "Still waiting. Remind the user to solve it in Chrome, then call wait_for_human again."}
+        if resume_url and not human.same_target(page.url, resume_url):
+            page.goto(resume_url, wait_until="domcontentloaded")
+            again = human.detect(page)
+            if again:
+                human.notify(page, again)
+                return {"resolved": False, "challenge": again, "url": page.url,
+                        "next": "The site asked again after reopening the page. Ask the user to solve it, then call wait_for_human (without resume_url)."}
+        return {"resolved": True, "url": page.url, "title": page.title()}
+
     def page_elements(self, query="", limit=30):
         page = self._get_page()
         self.last_obs = observe(page, self.cfg.max_elements)
-        return compact_page(self.last_obs, query, max(5, min(int(limit), 150)))
+        return compact_page(self.last_obs, query, max(5, min(int(limit), 150)), self.cfg.max_elements)
 
     def do_step(self, intent, action, ref=None, value=None, text=None, confirm_irreversible=False):
         page = self._get_page()
@@ -245,8 +321,12 @@ class BrowserService:
     def cache_op(self, op="list", domain=None):
         if op == "clear":
             self.cache.clear(domain)
+            if self.popups:
+                self.popups.clear(domain)
             return {"cleared": domain or "everything"}
         rows = self.cache.list(domain)
         return {"count": len(rows),
                 "entries": [{"page": f"{d}{p}", "intent": i, "hits": h, "fails": f}
-                            for d, p, i, h, f, _ in rows[:100]]}
+                            for d, p, i, h, f, _ in rows[:100]],
+                "popup_buttons": ({k: v for k, v in self.popups.list().items() if not domain or k == domain}
+                                  if self.popups else {})}
