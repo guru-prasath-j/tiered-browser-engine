@@ -1,5 +1,6 @@
 """The tiered engine: cache -> local LLM -> Claude text -> Claude vision."""
 import base64
+import re
 import hashlib
 import json
 import time
@@ -9,7 +10,9 @@ from collections import Counter
 from .cache import norm_intent
 from . import human
 from . import popups as popup_mod
-from .executor import NEEDS_ELEMENT, VALUE_ACTIONS, extract_text, locate_cached, perform, verify, wrong_target
+from . import forms
+from .executor import NEEDS_ELEMENT, VALUE_ACTIONS, extract_text, locate_cached, perform, verify, verify_ex, wrong_target
+from . import matcher
 from .llm import Usage, parse_json
 from .observer import observe, page_key
 from .safety import describe
@@ -113,6 +116,18 @@ class Engine:
         domain, pkey = page_key(before.url)
         feedback = None
 
+        # Rule tier: "answer: <question>" + value = pick that option by visible text, no model.
+        if key.startswith("answer") and value is not None:
+            question = intent.split(":", 1)[1].strip() if ":" in intent else intent[len("answer"):].strip()
+            if self.guard:
+                self.guard.check(self.intent, "click", value, {"label": str(value)})
+            res = forms.choose(self.page, question, value, self.cfg.settle_ms)
+            self.log.write("attempt", intent=key, tier="rule", ok=bool(res.get("ok")), note=str(res)[:200],
+                           tokens_in=0, tokens_out=0)
+            if res.get("ok") and res.get("checked") is not False:
+                return self._done(key, "rule", t0)
+            raise StepFailed(f"could not complete step '{intent}': {res.get('error') or res}")
+
         # Tier 0: replay a cached action, no model at all.
         hit = self.cache.get(domain, pkey, key)
         if hit:
@@ -133,14 +148,33 @@ class Engine:
                     self.cache.hit(domain, hit_page, key)
                     return self._done(key, "cache", t0)
 
+        # Tier "match": the intent names a label that exactly one element carries. No model.
+        if self.cfg.label_match:
+            obs = observe(self.page, self.cfg.max_elements)
+            decision = matcher.match(intent, value, obs)
+            if decision:
+                action = decision["action"]
+                ok, why, entry = self.execute_decision(decision, action, value, obs)
+                self.log.write("attempt", intent=key, tier="match", ok=ok, action=action, note=why,
+                               tokens_in=0, tokens_out=0)
+                if ok:
+                    if entry:
+                        d, p = page_key(obs.url)
+                        self.cache.put(d, p, key, entry)
+                    return self._done(key, "match", t0)
+                feedback = f"clicking the element labelled like the intent did not work: {why}"
+
         # Tiers 1-3: ask models, cheapest first.
         for tier, tries in self._tiers():
-            for _ in range(tries):
+            for attempt in range(tries):
                 if tier in CLAUDE_TIERS:
                     self._check_budget()
                 obs = observe(self.page, self.cfg.max_elements)
+                # Models see only the elements related to the step; a retry sees more.
+                limit = self.cfg.prompt_elements if attempt == 0 else self.cfg.prompt_elements_retry
+                prompt_obs = obs.subset(f"{intent} {value or ''}", limit)
                 try:
-                    raw, usage = self._decide(tier, intent, value, obs, feedback)
+                    raw, usage = self._decide(tier, intent, value, prompt_obs, feedback)
                 except Exception as e:
                     if tier == "local":
                         self.local_down = True
@@ -158,6 +192,11 @@ class Engine:
                     feedback = "your previous reply was not valid JSON; reply with only the JSON object"
                     continue
 
+                if not isinstance(decision, dict):
+                    feedback = "reply with one JSON object"
+                    continue
+                if tier == "local":
+                    decision["expect"] = {}  # small models guess these wrong; effects are checked instead
                 action = str(decision.get("action", "")).lower().strip()
                 reason = str(decision.get("reason", ""))[:200]
 
@@ -265,6 +304,11 @@ class Engine:
 
     def execute_decision(self, decision, action, value, obs):
         ref = decision.get("ref")
+        if isinstance(ref, str) and ("," in ref or " " in ref.strip()):
+            # models sometimes list several refs ("e20,e21,e22"): use the first one on the page
+            ref = next((r for r in re.split(r"[,\s]+", ref) if r in obs.by_ref), ref)
+        elif isinstance(ref, list):
+            ref = next((r for r in ref if r in obs.by_ref), None)
         text = value if (value is not None and action in VALUE_ACTIONS) else decision.get("text")
         loc = None
         if action in NEEDS_ELEMENT or (action == "press" and ref):
@@ -286,15 +330,20 @@ class Engine:
                 perform(self.page, action, loc, text, decision, self.cfg.settle_ms)
             except Exception as e:
                 return False, f"{action} raised: {str(e).splitlines()[0][:200]}", None
-            ok, why = verify(self.page, action, obs, loc, text, decision.get("expect"), self.cfg.max_elements)
+            ok, why, met = verify_ex(self.page, action, obs, loc, text, decision.get("expect"),
+                                     self.cfg.max_elements)
         if not ok:
             return False, why, None
+        if action == "extract":
+            met = False
 
         entry = None
         if action != "click_xy":  # coordinates are too fragile to cache
             selectors = obs.by_ref[ref].selectors if ref in obs.by_ref else []
             if selectors or action not in NEEDS_ELEMENT:
-                entry = {"action": action, "selectors": selectors, "expect": decision.get("expect") or {}}
+                # Only cache an expectation that really held; a wrong guess would fail every replay.
+                entry = {"action": action, "selectors": selectors,
+                         "expect": (decision.get("expect") or {}) if met else {}}
                 if value is None or action not in VALUE_ACTIONS:
                     entry["text"] = text  # values come from the plan; keys/URLs/scroll amounts are cached
         return True, why, entry

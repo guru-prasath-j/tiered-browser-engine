@@ -30,6 +30,9 @@ class ActionCache:
             CREATE TABLE IF NOT EXISTS plans (
                 key TEXT PRIMARY KEY, goal TEXT, plan_json TEXT,
                 hits INTEGER DEFAULT 0, updated REAL);
+            CREATE TABLE IF NOT EXISTS tasks (
+                name TEXT PRIMARY KEY, start_url TEXT, steps_json TEXT,
+                hits INTEGER DEFAULT 0, updated REAL);
             """
         )
         self.db.commit()
@@ -105,6 +108,27 @@ class ActionCache:
             (key, goal, json.dumps(steps), time.time()),
         )
         self.db.commit()
+
+    # ---- named tasks: a whole plan Claude doesn't have to write again ----------------
+    def put_task(self, name, start_url, steps):
+        self.db.execute(
+            "INSERT INTO tasks (name, start_url, steps_json, hits, updated) VALUES (?, ?, ?, 0, ?) "
+            "ON CONFLICT(name) DO UPDATE SET start_url=excluded.start_url, steps_json=excluded.steps_json, "
+            "updated=excluded.updated",
+            (norm_intent(name), start_url, json.dumps(steps), time.time()),
+        )
+        self.db.commit()
+
+    def get_task(self, name):
+        row = self.db.execute("SELECT start_url, steps_json FROM tasks WHERE name=?", (norm_intent(name),)).fetchone()
+        if not row:
+            return None
+        self.db.execute("UPDATE tasks SET hits=hits+1, updated=? WHERE name=?", (time.time(), norm_intent(name)))
+        self.db.commit()
+        return row[0], json.loads(row[1])
+
+    def list_tasks(self):
+        return self.db.execute("SELECT name, start_url, steps_json, hits FROM tasks ORDER BY updated DESC").fetchall()
 
     def drop_plan(self, key):
         self.db.execute("DELETE FROM plans WHERE key=?", (key,))

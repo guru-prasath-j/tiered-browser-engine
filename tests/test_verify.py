@@ -70,6 +70,7 @@ def test_engine_retries_a_wrong_click_and_caches_the_right_one():
             fh.write(PAGE)
         cfg = Config()
         cfg.data_dir, cfg.settle_ms = d, 50
+        cfg.label_match = False  # this test exercises the model tiers
         cache = ActionCache(cfg.cache_path)
         with sync_playwright() as pw:
             browser = pw.chromium.launch()

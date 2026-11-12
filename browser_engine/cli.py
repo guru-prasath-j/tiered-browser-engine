@@ -8,6 +8,7 @@ from .config import Config
 from .engine import BudgetExceeded, Engine, StepFailed, StepLog
 from .observer import observe
 from .safety import Blocked, Guard
+from .calllog import print_usage, usage_summary
 from .report import DEFAULT_BASELINE_PER_STEP, print_report, summarize
 
 
@@ -73,6 +74,23 @@ def cmd_report(args, cfg):
     return 0
 
 
+def cmd_usage(args, cfg):
+    s = usage_summary(cfg.calls_path, last=args.last, hours=args.hours, tool=args.tool)
+    if args.json:
+        print(json.dumps(s, indent=2, ensure_ascii=False))
+    else:
+        print_usage(s)
+    return 0
+
+
+def cmd_calls(args, cfg):
+    """Raw tail of calls.jsonl, one line per tool call."""
+    from .calllog import read_calls
+    for c in read_calls(cfg.calls_path)[-args.last:]:
+        print(json.dumps(c, ensure_ascii=False))
+    return 0
+
+
 def cmd_cache(args, cfg):
     cache = ActionCache(cfg.cache_path)
     if args.op == "clear":
@@ -107,6 +125,15 @@ def main(argv=None):
     rp.add_argument("--run-id")
     rp.add_argument("--baseline-per-step", type=int, default=DEFAULT_BASELINE_PER_STEP)
 
+    u = sub.add_parser("usage", help="MCP tool calls: queries and token usage")
+    u.add_argument("--last", type=int, default=20, help="how many recent calls to list")
+    u.add_argument("--hours", type=float, help="only calls from the last N hours")
+    u.add_argument("--tool", help="only one tool, e.g. run_browser_plan")
+    u.add_argument("--json", action="store_true")
+
+    cl = sub.add_parser("calls", help="raw JSON lines of recent tool calls")
+    cl.add_argument("--last", type=int, default=20)
+
     c = sub.add_parser("cache", help="inspect or clear the action cache")
     c.add_argument("op", choices=["list", "clear"])
     c.add_argument("--domain")
@@ -114,7 +141,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     cfg = Config()
     os.makedirs(cfg.data_dir, exist_ok=True)
-    return {"run": cmd_run, "report": cmd_report, "cache": cmd_cache}[args.cmd](args, cfg)
+    return {"run": cmd_run, "report": cmd_report, "usage": cmd_usage, "calls": cmd_calls,
+            "cache": cmd_cache}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":

@@ -65,6 +65,7 @@ def test_service_flow():
         url = "file://" + html
         cfg = Config()
         cfg.data_dir, cfg.settle_ms = d, 100
+        cfg.label_match = False  # this test exercises the model tiers
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             svc = BrowserService(cfg, local=NameOnlyLocal(), claude=None,
@@ -83,7 +84,7 @@ def test_service_flow():
 
             # 3. Local model gives up -> compact failure report -> Claude teaches one step.
             r = svc.run_plan("save", [{"intent": "click save for later"}], start_url=url)
-            assert not r["ok"] and not r["blocked"]
+            assert not r["ok"] and not r.get("blocked")
             assert any("Save for later" in line for line in r["page"]["elements"]), r["page"]
             assert len(json.dumps(r)) < 2000  # stays small for Claude's context
             els = svc.page_elements("save for later", limit=5)
@@ -116,10 +117,10 @@ def test_mcp_server_registration():
 
     async def go():
         tools = {t.name: t for t in await mcp_server.mcp.list_tools()}
-        assert set(tools) == {"browser_status", "run_browser_plan", "get_page_elements",
-                              "do_browser_step", "browser_token_report", "browser_cache", "wait_for_human"}
+        assert set(tools) == {"browser_status", "run_browser_plan", "get_page_elements", "extract_listings",
+                              "do_browser_step", "browser_info", "wait_for_human", "choose_option", "check_form"}
         schema = tools["run_browser_plan"].inputSchema
-        assert "steps" in schema["required"]
+        assert "goal" in schema["required"] and "task_name" in schema["properties"]
         os.environ["BE_DATA_DIR"] = tempfile.mkdtemp()
         out = await mcp_server.mcp.call_tool("browser_status", {})
         return out

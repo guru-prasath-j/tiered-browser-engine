@@ -27,8 +27,17 @@ class Config:
     # Hard cap on Claude tokens per run (planner + escalations)
     max_claude_tokens: int = 60_000
 
-    # Observation size: max interactive elements sent to a model
+    # Observation size: max interactive elements read from a page
     max_elements: int = 150
+    # ...but a model prompt only gets the ones related to the step (first try / retry)
+    prompt_elements: int = field(default_factory=lambda: int(_env("BE_PROMPT_ELEMENTS", "30")))
+    prompt_elements_retry: int = field(default_factory=lambda: int(_env("BE_PROMPT_ELEMENTS_RETRY", "80")))
+
+    # Elements returned to Claude in failure reports / after a manual step
+    report_elements: int = field(default_factory=lambda: int(_env("BE_REPORT_ELEMENTS", "12")))
+
+    # Zero-token tier: do the step from element labels alone when the target is unambiguous
+    label_match: bool = field(default_factory=lambda: _env("BE_LABEL_MATCH", "1") != "0")
 
     # Wait after each action for the page to settle (ms)
     settle_ms: int = 800
@@ -48,6 +57,10 @@ class Config:
     @property
     def log_path(self):
         return os.path.join(self.data_dir, "steps.jsonl")
+
+    @property
+    def calls_path(self):
+        return os.path.join(self.data_dir, "calls.jsonl")
 
     @property
     def popups_path(self):

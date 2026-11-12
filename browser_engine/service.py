@@ -3,6 +3,7 @@
 All methods are synchronous and must be called from the same thread (Playwright's sync API);
 mcp_server.py takes care of that.
 """
+import json
 import os
 import re
 import sys
@@ -10,7 +11,7 @@ import urllib.request
 
 from .cache import ActionCache, norm_intent
 from .config import Config
-from . import human
+from . import forms, human
 from .engine import BudgetExceeded, Engine, HumanNeeded, StepFailed, StepLog, normalize_steps
 from .observer import observe, page_key
 from .report import print_report, summarize  # noqa: F401  (print_report kept for CLI parity)
@@ -70,6 +71,11 @@ def coverage(obs, query, limit, max_elements=150):
     return out
 
 
+def _prune(d):
+    """Drop empty / zero fields: every key Claude reads costs tokens."""
+    return {k: v for k, v in d.items() if v not in (None, [], {}, "", 0, False) or k in ("ok",)}
+
+
 def compact_page(obs, query="", limit=30, max_elements=150):
     page = {
         "url": obs.url,
@@ -95,6 +101,7 @@ class BrowserService:
         self._pw = None
         self._local = local
         self._claude = claude
+        self._site_memory = None
 
     # ---- wiring ----------------------------------------------------------
     def _get_local(self):
@@ -181,17 +188,34 @@ class BrowserService:
             "chrome_cdp": {"url": self.cdp, "reachable": chrome_ok},
             "claude_api_tier": os.getenv("BE_ALLOW_CLAUDE_API") == "1",
             "cached_actions": len(self.cache.list()),
+            "saved_tasks": [r[0] for r in self.cache.list_tasks()[:20]],
             "hints": hints,
         }
 
-    def run_plan(self, goal, steps, start_url=None, confirm_irreversible=False):
+    def run_plan(self, goal, steps=None, start_url=None, confirm_irreversible=False, task_name=None, values=None):
+        if not steps and task_name:
+            saved = self.cache.get_task(task_name)
+            if not saved:
+                return {"ok": False, "error": f"no saved task {task_name!r}; pass steps (it is saved when it succeeds)"}
+            saved_url, steps = saved
+            start_url = start_url or saved_url
+            if values:  # {"<intent>": "<value>"} or {"<step number>": "<value>"} overrides
+                for i, st in enumerate(steps):
+                    for k in (st["intent"], str(i + 1), str(i)):
+                        if k in values:
+                            st["value"] = values[k]
+                            break
         try:
-            return self._run_plan(goal, steps, start_url, confirm_irreversible)
+            res = self._run_plan(goal, steps, start_url, confirm_irreversible)
         except Exception as e:
             if "closed" not in str(e).lower() and "target" not in str(e).lower():
                 raise
             self.page = None  # tab or browser went away mid-run: one clean retry
-            return self._run_plan(goal, steps, start_url, confirm_irreversible)
+            res = self._run_plan(goal, steps, start_url, confirm_irreversible)
+        if res.get("ok") and task_name:
+            self.cache.put_task(task_name, start_url, normalize_steps(steps))
+            res["saved_as"] = task_name
+        return res
 
     def _run_plan(self, goal, steps, start_url=None, confirm_irreversible=False):
         steps = normalize_steps(steps)
@@ -229,30 +253,25 @@ class BrowserService:
             blocked = isinstance(e, Blocked)
             log.write("run", ok=False, goal=goal, completed=done, blocked=blocked,
                       tiers=dict(eng.tiers_used), claude_tokens=eng.claude_tokens)
-            return {
+            return _prune({
                 "ok": False,
                 "blocked": blocked,
-                "error": str(e)[:400],
+                "error": str(e)[:240],
                 "completed": done,
                 "failed_step": failed,
                 "remaining_steps": steps[done + 1:],
                 "tiers": dict(eng.tiers_used),
                 "popups_closed": eng.popups_closed,
                 "extracted": eng.extracted,
-                "page": compact_page(self.last_obs, failed["intent"], 25, self.cfg.max_elements),
-                "next": (
-                    "Ask the user to approve or do this step themselves. If they approve an irreversible "
-                    "step, call do_browser_step with confirm_irreversible=true."
-                    if blocked else
-                    "Do this one step with do_browser_step (it teaches the cache), then call "
-                    "run_browser_plan with remaining_steps. If the plan itself was wrong, fix it instead."
-                ),
-            }
+                "page": compact_page(self.last_obs, failed["intent"], self.cfg.report_elements, self.cfg.max_elements),
+                "next": ("needs user approval; then do_browser_step with confirm_irreversible=true" if blocked else
+                         "do_browser_step for this step (with next_intent), then run_browser_plan remaining_steps"),
+            })
         if eng.human_waits:
             log.write("human", note=f"resumed after {eng.human_waits} bot check(s)")
         log.write("run", ok=True, goal=goal, steps=len(steps), tiers=dict(eng.tiers_used),
                   claude_tokens=eng.claude_tokens)
-        return {
+        return _prune({
             "ok": True,
             "steps": len(steps),
             "tiers": dict(eng.tiers_used),
@@ -262,7 +281,7 @@ class BrowserService:
             "extracted": eng.extracted,
             "url": page.url,
             "title": page.title(),
-        }
+        })
 
     def wait_human(self, timeout_s=50, resume_url=None):
         """Wait for the user to clear a bot check, then optionally reopen resume_url."""
@@ -288,7 +307,8 @@ class BrowserService:
         self.last_obs = observe(page, self.cfg.max_elements)
         return compact_page(self.last_obs, query, max(5, min(int(limit), 150)), self.cfg.max_elements)
 
-    def do_step(self, intent, action, ref=None, value=None, text=None, confirm_irreversible=False):
+    def do_step(self, intent, action, ref=None, value=None, text=None, confirm_irreversible=False,
+                next_intent=None):
         page = self._get_page()
         obs = self.last_obs
         if obs is None or obs.url != page.url:
@@ -313,7 +333,51 @@ class BrowserService:
         out = {"ok": ok, "note": why, "learned": learned, "url": page.url}
         if eng.extracted:
             out["extracted"] = eng.extracted
-        return out
+        # Hand back the elements for the next step right away, so Claude doesn't need a separate
+        # get_page_elements call (one round trip and one element list saved per manual step).
+        try:
+            self.last_obs = observe(page, self.cfg.max_elements)
+            if next_intent or not ok:
+                out["page"] = compact_page(self.last_obs, next_intent or intent, self.cfg.report_elements,
+                                           self.cfg.max_elements)
+        except Exception:
+            self.last_obs = None
+        return _prune(out)
+
+    def choose_option(self, question, option, confirm_irreversible=False):
+        page = self._get_page()
+        guard = Guard(confirm_irreversible)
+        try:
+            guard.check(f"answer: {question}", "click", option, {"label": str(option)})
+        except Blocked as e:
+            return {"ok": False, "blocked": True, "error": str(e)}
+        res = forms.choose(page, question, option, self.cfg.settle_ms)
+        self.last_obs = None
+        StepLog(self.cfg.log_path).write("step", intent=norm_intent(f"answer: {question}"), tier="rule",
+                                         ok=bool(res.get("ok")), note=str(res)[:200])
+        return res
+
+    def extract_listings(self, url=None, limit=20, query=""):
+        from . import listings
+
+        page = self._get_page()
+        self.last_obs = None
+        if self._site_memory is None:
+            self._site_memory = listings.SiteMemory(listings.memory_path(self.cfg.data_dir))
+        res = listings.extract(page, url, max(1, min(int(limit), 100)), query, self._site_memory)
+        reason = human.detect(page)
+        if reason:
+            human.notify(page, reason)
+            return {"ok": False, "needs_human": True, "challenge": reason, "resume_url": url or page.url}
+        return res
+
+    def tasks(self):
+        return {"tasks": [{"name": n, "start_url": u, "steps": len(json.loads(st)), "runs": h}
+                          for n, u, st, h in self.cache.list_tasks()]}
+
+    def check_form(self):
+        page = self._get_page()
+        return forms.check_form(page)
 
     def report(self, run_id=None):
         return summarize(self.cfg.log_path, run_id=run_id) or {"note": "no runs logged yet"}

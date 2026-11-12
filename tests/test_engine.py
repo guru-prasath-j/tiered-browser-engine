@@ -111,7 +111,9 @@ def test_live_run_learns_then_replays():
                 assert page.url.endswith("#job-48213")
                 assert page.locator("select").input_value() == "Bengaluru"
                 if run == 1:
-                    assert summary["tiers"] == {"local": 5} and FakeLocal.calls == 5
+                    # 3 steps name their target by label and need no model at all; the
+                    # "first job result" and "remote only" steps still go to the local model.
+                    assert summary["tiers"] == {"match": 3, "local": 2} and FakeLocal.calls == 2
                 else:
                     assert summary["tiers"] == {"cache": 5} and FakeLocal.calls == 0
                 page.close()
@@ -149,6 +151,7 @@ def test_escalation_and_budget_accounting():
             fh.write(PAGE)
         cfg = Config()
         cfg.data_dir, cfg.settle_ms = d, 100
+        cfg.label_match = False  # this test exercises the model tiers
         cache = ActionCache(cfg.cache_path)
         with sync_playwright() as pw:
             browser = pw.chromium.launch()

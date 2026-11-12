@@ -23,6 +23,12 @@ Actions:
 "expect" is optional; fill it only when you are sure what the page shows afterwards.
 Elements marked (offscreen) exist outside the viewport; you can still click them."""
 
+# The local model never writes "expect": its guesses caused false failures, and the engine checks the
+# real effect anyway. Fewer output tokens too.
+LOCAL_SYSTEM = (ACTION_SYSTEM
+                .replace(', "expect": {"url_contains": "", "text_visible": ""}', "")
+                .replace('\n"expect" is optional; fill it only when you are sure what the page shows afterwards.', ""))
+
 VISION_EXTRA = """
 
 A screenshot of the viewport is attached. Prefer a "ref" from the element list. Only if the target is not in the list (canvas, image-only UI), use {"action": "click_xy", "x": <px>, "y": <px>} in screenshot pixels."""
@@ -83,10 +89,10 @@ class LocalLLM:
 
     def decide(self, intent, value, obs, feedback=None):
         messages = [
-            {"role": "system", "content": ACTION_SYSTEM},
+            {"role": "system", "content": LOCAL_SYSTEM},
             {"role": "user", "content": build_action_prompt(intent, value, obs.text, feedback)},
         ]
-        kwargs = dict(model=self.model, messages=messages, temperature=0, max_tokens=300)
+        kwargs = dict(model=self.model, messages=messages, temperature=0, max_tokens=160)
         try:
             r = self.client.chat.completions.create(response_format={"type": "json_object"}, **kwargs)
         except Exception as e:

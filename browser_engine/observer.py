@@ -67,7 +67,12 @@ EXTRACT_JS = r"""
     if (type === 'hidden' || el.disabled || el.getAttribute('aria-hidden') === 'true') continue;
     const r = el.getBoundingClientRect();
     const st = window.getComputedStyle(el);
-    const hidden = r.width < 2 || r.height < 2 || st.visibility === 'hidden' || st.display === 'none' || st.opacity === '0';
+    let hidden = r.width < 2 || r.height < 2 || st.visibility === 'hidden' || st.display === 'none' || st.opacity === '0';
+    // Styled radios/checkboxes hide the real <input> ("sr-only") and show its <label> instead.
+    if (hidden && (type === 'radio' || type === 'checkbox')) {
+      const lab = (el.labels && el.labels[0]) || el.closest('label');
+      if (lab) { const lr = lab.getBoundingClientRect(); if (lr.width > 1 && lr.height > 1) hidden = false; }
+    }
     if (hidden && type !== 'file') continue;
     const role = roleOf(el);
     const name = nameOf(el);
@@ -150,10 +155,42 @@ class Observation:
         parts.extend(e.line() for e in self.elements)
         return "\n".join(parts)
 
+    def subset(self, query, limit):
+        """Same page, only the `limit` elements most related to `query` (kept in page order).
+
+        Used for model prompts: a 7B model reads ~25 relevant lines much faster and more
+        accurately than 150 lines of navigation. Refs stay the same as in the full list.
+        """
+        if len(self.elements) <= limit:
+            return self
+        return Observation(url=self.url, title=self.title, headings=self.headings,
+                           elements=rank(self.elements, query, limit))
+
     @property
     def signature(self):
         body = "\n".join([self.url, self.title, *self.headings, *(e.line() for e in self.elements)])
         return hashlib.sha1(body.encode()).hexdigest()
+
+
+_STOP = {"the", "a", "an", "to", "into", "in", "on", "of", "and", "for", "click", "type", "select",
+         "press", "open", "go", "field", "box", "button", "link", "page", "with", "this", "read"}
+
+
+def _q_words(text):
+    return set(re.findall(r"[a-z0-9]+", (text or "").lower())) - _STOP
+
+
+def rank(elements, query, limit):
+    """Top `limit` elements by word overlap with `query`, ties broken by in-view then page order."""
+    qw = _q_words(query)
+
+    def score(idx_e):
+        idx, e = idx_e
+        ew = set(re.findall(r"[a-z0-9]+", f"{e.name} {e.role} {e.value}".lower()))
+        return (-(3 * len(qw & ew) + (1 if e.in_view else 0)), idx)
+
+    top = sorted(enumerate(elements), key=score)[:limit]
+    return [e for _, e in sorted(top, key=lambda t: t[0])]
 
 
 def observe(page, max_elements=150):

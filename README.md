@@ -3,8 +3,41 @@
 Browser automation that spends Claude tokens only when it has to. Every step goes through four tiers, cheapest first, and whatever works gets cached so the next run is free.
 
 ```
-cache (0 tokens) -> local LLM (free) -> Claude text (~4k) -> Claude vision (~7k)
+cache (0) -> label match (0) -> local LLM (free) -> Claude text (~4k) -> Claude vision (~7k)
 ```
+
+## v0.7: what changed, measured
+
+Built from the real step log (26 runs, 81 steps): 40% of steps had to be done by Claude by hand,
+and about half of the local model's failures were false: the action worked, but the model's own
+guess about the next URL or page text (e.g. a date written as `261029`) didn't match.
+
+| | v0.6 | v0.7 |
+|---|---|---|
+| Action steps of the 6 bench tasks done with **no model at all** (offline replicas, cold cache) | 0 / 10 | 10 / 10 |
+| Page text in a local-model prompt (150-element page) | ~760 tokens | ~190 tokens |
+| Failure report Claude reads | ~330 tokens | ~190 tokens |
+| Fixed per-turn cost of tool definitions + instructions | ~2,050 tokens | ~1,660 tokens (with one tool more) |
+
+- **Label match tier (0 tokens).** If the step names a label that exactly one element of a fitting
+  role carries ("type into the telephone field", "click the Next page link"), it is done without a
+  model, then verified and cached like any other step. Ambiguous or positional steps ("the first
+  result") still go to the model.
+- **Effects, not guesses.** A step is judged by what happened (field value, checkbox state,
+  navigation, page change). The model's guessed URL/text never fails a working step, and is only
+  cached if it actually held. The local model no longer writes guesses at all.
+- **Fixes for the logged failures:** formatted phone fields (`+91 80567 08293`), several refs in one
+  reply, custom (non-`<select>`) dropdowns, clicks on covered elements (scroll + retry + DOM click),
+  cached selectors that match a hidden duplicate.
+- **Smaller prompts.** A model sees the 30 elements most related to the step (80 on retry).
+- **Claude side:** `do_browser_step(next_intent=...)` returns the next step's elements, so no
+  extra `get_page_elements` call; empty fields are dropped from results; failure reports carry 12
+  elements; `run_browser_plan(task_name=...)` saves a working plan, and later
+  `run_browser_plan(task_name, values)` replays it with no steps written at all.
+- **`extract_listings(url)`**: reads listings/products/jobs as one compact line per item from the
+  page's embedded data, its own JSON feed, or repeated DOM cards. No model. The source that worked
+  is remembered per site in `~/.browser_engine/sites.json`.
+- `browser_token_report`, `browser_cache` and `browser_usage_log` are now one tool, `browser_info`.
 
 Pages are read as a pruned list of interactive elements (text), not screenshots. Results are checked with DOM assertions, not "take a screenshot and ask if it worked". Screenshots are only used by the last tier.
 
@@ -90,8 +123,8 @@ Then install `browser-engine.skill` so Claude prefers these tools over screensho
 | `run_browser_plan` | Runs a list of atomic steps; returns a short failure report if a step can't be done |
 | `get_page_elements` | Current page elements, ranked by a query, so the list stays short |
 | `do_browser_step` | Claude does one step itself; if it works it's cached, so next time it's free |
-| `browser_token_report` | Tokens used vs a screenshot-only agent, and which steps keep needing help |
-| `browser_cache` | List or clear learned actions per domain |
+| `extract_listings` | Listings/products/jobs on a page as compact rows from the site's own data (0 tokens) |
+| `browser_info` | `report` (tokens vs screenshot agent), `usage` (calls.jsonl log), `cache_list` / `cache_clear`, `tasks` |
 
 By default the server never calls the Claude API: in Cowork or Claude Code, Claude itself is the
 fallback through `do_browser_step`, so no API key is needed. Set `BE_ALLOW_CLAUDE_API=1` (plus
@@ -113,7 +146,7 @@ worked is saved per site in `~/.browser_engine/popups.json` and tried first next
 step fails, popups are checked once more and the step is retried before any model is asked.
 It never clicks anything that signs in, subscribes, buys or submits, and dialogs that your plan opened
 itself (filters, date pickers) are left alone. Turn it off with `BE_DISMISS_POPUPS=0`.
-Results include `popups_closed`, and `browser_cache` lists the learned buttons.
+Results include `popups_closed`, and `browser_info` with `op: cache_list` lists the learned buttons.
 
 ## CLI usage
 
@@ -256,3 +289,40 @@ python tests/test_guest.py   # popups, guest mode, A2A server (needs .[a2a])
 ```
 
 The live tests use a fake local model on a local HTML page, so no Ollama or API key is needed. They check that the first run learns every step and the second replays all of them from the cache, that a broken cached selector heals, that the safety rules block password fields and unconfirmed submits, that a step Claude teaches through `do_browser_step` becomes a free cache hit, and that the MCP server registers all six tools.
+
+## v0.5.0: custom form questions and pre-submit check
+
+Many application forms draw radio buttons as styled labels over hidden inputs, or as plain
+clickable divs, so they never show up in `get_page_elements`. Two new MCP tools handle them with
+no model at all (0 tokens):
+
+- `choose_option(question, option)` picks the answer by visible text, e.g.
+  `choose_option("years of experience as a Backend Engineer with Python", "1 - 2 years")`.
+  Works for native radios/checkboxes/selects, hidden "sr-only" inputs, ARIA radios/options and
+  clickable divs. Question matching is fuzzy (word overlap), option matching prefers exact text.
+  In a plan, use the step `{"intent": "answer: <question>", "value": "<option>"}`.
+- `check_form()` lists required questions that are still unanswered (labels ending in `*`,
+  `required` / `aria-required` fields, empty radio groups). Call it before any Send/Submit step.
+
+The observer now also lists hidden radios/checkboxes whose label is visible, and `check` /
+`uncheck` fall back to clicking the label or the element when Playwright can't tick a hidden input.
+Tests: `tests/test_forms.py`.
+
+## v0.6.0: query and token usage log
+
+Every MCP tool call is appended to `~/.browser_engine/calls.jsonl`: the tool, what was asked
+(goal, start URL, step intents, query, ref), whether it worked, how long it took, the estimated
+Claude tokens for the request and the result (chars / 4), and the local-model / Claude API tokens
+the engine spent during that call.
+
+```bash
+browser-engine usage                 # totals, per-tool table, heaviest results, recent calls
+browser-engine usage --hours 24      # last day only
+browser-engine usage --tool get_page_elements --last 50
+browser-engine usage --json
+browser-engine calls --last 10       # raw JSON lines
+tail -f ~/.browser_engine/calls.jsonl
+```
+
+From Claude, ask for `browser_info` with `op: usage` (same summary). Set `BE_LOG_CALLS=0` to turn the
+log off, or `BE_LOG_VALUES=0` to keep typed values (names, emails, answers) out of it.
