@@ -216,6 +216,24 @@ Environment variables: `BE_LOCAL_BASE_URL`, `BE_LOCAL_MODEL`, `BE_CLAUDE_TEXT_MO
 | `guest.py` | Guest mode for remote callers: isolated browser, URL policy, login-wall stop. |
 | `a2a_agent.py` | Google ADK agent + A2A server with bearer auth. |
 
+## Use it yourself, or give it to a non-technical person: Browser Helper (v0.8)
+
+`browser-engine-home` is a personal agent (Google ADK) with a local chat page at http://127.0.0.1:8770.
+It drives a browser window on **your own** computer with a saved profile, so a site you sign in to once
+stays signed in. You type passwords, OTPs and payments yourself (safety.py refuses those fields).
+Submit, book and send need a "yes" in the chat for that exact action (`user_confirmed`). The planner
+is Gemini (free key) or local Ollama. The page binds to 127.0.0.1 only and checks Host/Origin, so other
+sites and other devices can't drive it.
+
+```bash
+bash install.sh                 # macOS/Linux one-step setup (Windows: install.ps1), adds a Desktop launcher
+browser-engine-home             # or double-click "Browser Helper" on the Desktop
+browser-engine-home --set-key   # change the Gemini key (stored in ~/.browser_engine/home.env, mode 600)
+```
+
+Plain-language guide for someone else: [HOME_SETUP.md](HOME_SETUP.md). Env: `BE_HOME_MODEL` (any
+LiteLLM id), `BE_HOME_PORT`.
+
 ## Share it as an A2A agent (Google ADK)
 
 `browser-engine-a2a` serves the engine as an [A2A](https://a2a-protocol.org) agent built with Google
@@ -285,6 +303,7 @@ The observer does not look inside iframes or shadow DOM yet, so those pages fall
 
 ```bash
 python tests/test_engine.py && python tests/test_mcp.py && python tests/test_extract.py
+python tests/test_home.py    # home agent chat page, settings, model choice (needs .[home])
 python tests/test_guest.py   # popups, guest mode, A2A server (needs .[a2a])
 ```
 
