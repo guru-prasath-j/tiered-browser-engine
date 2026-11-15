@@ -25,8 +25,8 @@ class Config:
     vision_tries: int = 1
 
     # Layer 2 (vision.py): decide from screenshots when the HTML can't be read or layer 1 gave up
+    # Local models only (comma-separated fallback list); layer 2 never calls a cloud API.
     vision_local_model: str = field(default_factory=lambda: _env("BE_VISION_LOCAL_MODEL", "qwen2.5vl:7b"))
-    vision_gemini_model: str = field(default_factory=lambda: _env("BE_VISION_GEMINI_MODEL", "gemini-2.5-flash"))
     vision_layer_tries: int = field(default_factory=lambda: int(_env("BE_VISION_TRIES", "2")))
     # Screen change that counts as "the click / typing worked": the largest mean pixel difference
     # (0-255) of any 32x32 block between the screenshots before and after (vision.diff)

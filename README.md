@@ -221,7 +221,7 @@ Environment variables: `BE_LOCAL_BASE_URL`, `BE_LOCAL_MODEL`, `BE_CLAUDE_TEXT_MO
 | Layer | Reads | Tiers, cheapest first |
 |---|---|---|
 | **1. Elements** | the page's HTML elements | rule → cache → label match → local LLM (Ollama) → Claude text/vision (paid, opt-in) |
-| **2. Screenshots** | only pixels | 📷 local vision model (Ollama) → 📷 Gemini (free tier) → 📷 Claude (paid, opt-in) |
+| **2. Screenshots** | only pixels | 📷 local vision models only (Ollama), one or a fallback list. **Never a cloud or paid API.** |
 
 Layer 1 is cheap and precise but needs readable elements. Some pages hide their structure: canvas
 apps, closed shadow DOM, cross-origin iframes, randomised/obfuscated markup, or anti-bot scripts that
@@ -232,7 +232,7 @@ break element reading. Layer 2 handles those by looking at the screen like a per
 3. The engine moves the mouse there (hover first), clicks or types, and **verifies by pixels**: the URL
    changed, or a 32×32 block of the screen changed (around the field for typing). Hover highlights
    don't count.
-4. On failure the next try gets the reason as feedback; then the next model.
+4. On failure the next try gets the reason as feedback; then the next local model in the list.
 
 Layer 2 runs when layer 1 gives up on a step, or **straight away** when the page shows no readable
 elements. "read …" steps return text the model copies from the screenshot (`"source": "screenshot"`),
@@ -242,11 +242,14 @@ Safety is the same in both layers: the model must name the `target` and `field` 
 fields are refused, and irreversible clicks (pay, submit, send, apply…) still need the user's yes.
 Coordinates are never cached; successful layer-1 actions still are.
 
-Setup: `ollama pull qwen2.5vl:7b` (free, local) and/or a Gemini key (`GOOGLE_API_KEY` or
-`GEMINI_API_KEY`). Env: `BE_VISION=0` (layer off), `BE_VISION_LOCAL=0`, `BE_VISION_GEMINI=0`,
-`BE_VISION_LOCAL_MODEL`, `BE_VISION_GEMINI_MODEL`, `BE_VISION_TRIES` (default 2 per model),
-`BE_VISION_CLICK_DIFF` / `BE_VISION_TYPE_DIFF` (pixel-change thresholds, default 6). Guest mode (A2A)
-only uses the local vision model, never your API keys. In the log viewer, layer 2 shows as
+**Local only, enforced in code:** layer 2 talks only to the loopback server at `BE_LOCAL_BASE_URL`
+(localhost / 127.x). A cloud URL is refused, and Gemini / Claude / OpenAI keys are ignored by this layer.
+If no local vision model is installed, layer 2 is off and layer 1 works as before.
+
+Setup: `ollama pull qwen2.5vl:7b`. Env: `BE_VISION_LOCAL_MODEL` (one model or a fallback list, e.g.
+`qwen2.5vl:7b,llama3.2-vision`; models that aren't pulled are skipped with a hint), `BE_VISION=0`
+(layer off), `BE_VISION_TRIES` (default 2 per model), `BE_VISION_CLICK_DIFF` / `BE_VISION_TYPE_DIFF`
+(pixel-change thresholds, default 6). In the log viewer, layer 2 shows as
 "layer 2: screenshots" followed by 📷 tiers. `browser_status` lists the active vision models.
 
 ## Visual logs: see exactly where a run failed (v0.9)
@@ -356,7 +359,7 @@ The observer does not look inside iframes or shadow DOM yet, so those pages fall
 
 ```bash
 python tests/test_engine.py && python tests/test_mcp.py && python tests/test_extract.py
-python tests/test_vision.py   # layer 2: blind pages, retries, typing, reading, guard (real Chromium)
+python tests/test_vision.py   # layer 2: local-only, blind pages, retries, typing, reading, guard (real Chromium)
 python tests/test_logviz.py  # visual logs: 24h pruning, run grouping, viewer server
 python tests/test_home.py    # home agent chat page, settings, model choice (needs .[home])
 python tests/test_guest.py   # popups, guest mode, A2A server (needs .[a2a])

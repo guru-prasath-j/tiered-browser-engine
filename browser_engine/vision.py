@@ -11,13 +11,13 @@ or straight away when the page shows no readable elements:
     screenshot (+ a light pixel grid) -> vision model -> {"action", "x", "y", ...}
     -> mouse/keyboard at those coordinates -> new screenshot -> did the pixels / URL change?
 
-Vision models, cheapest first (each one gets BE_VISION_TRIES tries with the previous failure as
-feedback):
-  vision_local   Ollama vision model, free:       BE_VISION_LOCAL_MODEL  (default qwen2.5vl:7b)
-  vision_gemini  Gemini, free tier:               GOOGLE_API_KEY / GEMINI_API_KEY,
-                                                  BE_VISION_GEMINI_MODEL (default gemini-2.5-flash)
-  vision_claude  Claude, paid, only with BE_ALLOW_CLAUDE_API=1 (BE_CLAUDE_VISION_MODEL)
-Turn the layer off with BE_VISION=0, or one model with BE_VISION_LOCAL=0 / BE_VISION_GEMINI=0.
+LOCAL MODELS ONLY. Layer 2 never calls a cloud or paid API, whatever keys are set: it only talks
+to the local OpenAI-compatible server (Ollama) at BE_LOCAL_BASE_URL, and refuses any other host.
+  BE_VISION_LOCAL_MODEL  one model or a comma-separated fallback list, all pulled in Ollama
+                         (default qwen2.5vl:7b; e.g. "qwen2.5vl:7b,llama3.2-vision")
+  BE_VISION_TRIES        tries per model, each with the previous failure as feedback (default 2)
+  BE_VISION=0            turn the layer off
+If no local vision model is installed, layer 2 is simply off and layer 1 behaves as before.
 
 The same safety rules apply: the model must name the element it acts on ("target") and what
 kind of field it is ("field"); password/OTP/card fields are refused, and irreversible clicks
@@ -34,7 +34,6 @@ import urllib.request
 from .llm import Usage, parse_json
 from .safety import Blocked
 
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 GRID = 100
 SENSITIVE_FIELDS = {"password", "otp", "card", "pin", "cvv"}
 ACTIONS = {"click", "type", "press", "scroll", "extract", "done", "fail"}
@@ -146,7 +145,7 @@ def coords(d, size):
     x, y = d.get("x"), d.get("y")
     pt = d.get("point") or d.get("coordinates")
     if (x is None or y is None) and isinstance(pt, (list, tuple)) and len(pt) >= 2:
-        # Gemini's native format is [y, x] on a 0-1000 scale
+        # some models answer [y, x] on a 0-1000 scale
         y, x = pt[0], pt[1]
         try:
             return float(x) / 1000 * W, float(y) / 1000 * H
@@ -165,11 +164,13 @@ def coords(d, size):
 
 # ---- model clients ---------------------------------------------------------------
 class OpenAIVision:
-    """Any OpenAI-compatible chat API that accepts images: Ollama, Gemini, LM Studio ..."""
+    """A LOCAL OpenAI-compatible server that accepts images (Ollama, LM Studio, llama.cpp)."""
 
     def __init__(self, base_url, api_key, model):
         from openai import OpenAI
 
+        if not is_local_url(base_url):
+            raise ValueError(f"layer 2 only uses local models; refusing {base_url}")
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=90)
         self.model = model
 
@@ -193,23 +194,6 @@ class OpenAIVision:
         return r.choices[0].message.content or "", usage
 
 
-class ClaudeVision:
-    def __init__(self, cfg):
-        import anthropic
-
-        self.client = anthropic.Anthropic()
-        self.model = cfg.claude_vision_model
-
-    def decide(self, system, prompt, img_b64):
-        r = self.client.messages.create(
-            model=self.model, max_tokens=400, system=system,
-            messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}},
-                {"type": "text", "text": prompt}]}])
-        text = "".join(getattr(b, "text", "") for b in r.content if getattr(b, "type", "") == "text")
-        return text, Usage(r.usage.input_tokens, r.usage.output_tokens)
-
-
 def _local_has_model(base_url, model):
     try:
         with urllib.request.urlopen(base_url.rstrip("/") + "/models", timeout=2) as r:
@@ -219,29 +203,32 @@ def _local_has_model(base_url, model):
     return model in ids or f"{model}:latest" in ids or model.split(":")[0] + ":latest" in ids
 
 
+def is_local_url(url):
+    """Only loopback servers count as local: layer 2 must never reach a cloud API."""
+    from urllib.parse import urlparse
+
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1") or host.startswith("127.")
+
+
 def providers(cfg):
-    """[(tier_name, client)], free first. Built once per engine service."""
-    if not _env_on("BE_VISION"):
+    """[(tier_name, client)] for every LOCAL vision model that is installed. Never a cloud API."""
+    if not _env_on("BE_VISION") or not _env_on("BE_VISION_LOCAL") or os.getenv("BE_NO_LOCAL") == "1":
+        return []
+    if not is_local_url(cfg.local_base_url):
+        print(f"[browser-engine] screenshot layer off: {cfg.local_base_url} is not a local server",
+              file=sys.stderr)
         return []
     out = []
-    if _env_on("BE_VISION_LOCAL") and os.getenv("BE_NO_LOCAL") != "1":
-        model = cfg.vision_local_model
-        if _local_has_model(cfg.local_base_url, model):
-            try:
-                out.append(("vision_local", OpenAIVision(cfg.local_base_url, "local", model)))
-            except Exception as e:
-                print(f"[browser-engine] local vision disabled: {e}", file=sys.stderr)
-    key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if key and _env_on("BE_VISION_GEMINI"):
+    for model in [m.strip() for m in cfg.vision_local_model.split(",") if m.strip()]:
+        if not _local_has_model(cfg.local_base_url, model):
+            print(f"[browser-engine] local vision model {model!r} not installed "
+                  f"(run: ollama pull {model})", file=sys.stderr)
+            continue
         try:
-            out.append(("vision_gemini", OpenAIVision(GEMINI_BASE, key, cfg.vision_gemini_model)))
+            out.append(("vision_local", OpenAIVision(cfg.local_base_url, "local", model)))
         except Exception as e:
-            print(f"[browser-engine] Gemini vision disabled: {e}", file=sys.stderr)
-    if os.getenv("BE_ALLOW_CLAUDE_API") == "1":
-        try:
-            out.append(("vision_claude", ClaudeVision(cfg)))
-        except Exception as e:
-            print(f"[browser-engine] Claude vision disabled: {e}", file=sys.stderr)
+            print(f"[browser-engine] local vision model {model!r} disabled: {e}", file=sys.stderr)
     return out
 
 
@@ -295,6 +282,7 @@ class VisionLayer:
                     continue
                 ok, why = self._act(eng, d, value, before, url0, name)
                 eng.log.write("attempt", intent=key, tier=name, ok=ok, layer=2,
+                              model=getattr(client, "model", None),
                               action=str(d.get("action", ""))[:20],
                               note=(f'{why} [target: {str(d.get("target") or "")[:60]}'
                                     + (f' at {round(float(d["x"]))},{round(float(d["y"]))}]'
@@ -317,8 +305,8 @@ class VisionLayer:
         if action == "fail":
             return False, "gave up: " + str(d.get("reason") or "")[:150]
         if action == "done":
-            if value is not None and name == "vision_local":
-                return False, "small model claimed done for a step with a value"
+            if value is not None:
+                return False, "model claimed done for a step with a value; do it instead"
             return True, "already done (by screenshot)"
         if action == "extract":
             text = str(d.get("text") or "").strip()

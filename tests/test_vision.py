@@ -89,16 +89,17 @@ def run(page):
     assert tiers == ["vision_local"], tiers  # no cache / match / local tiers on a blind page
     print("ok blind page -> screenshot click")
 
-    # 2. First model misses (nothing changes), second model fixes it with the feedback.
+    # 2. First local model misses (nothing changes), second local model fixes it with the feedback.
     load(page, CANVAS)
     bad = Scripted({"action": "click", "x": 50, "y": 50, "target": "Search"},
                    {"action": "fail", "reason": "can't find it"})
-    good = Scripted({"action": "click", "point": [317, 500], "target": "Search"})  # Gemini [y, x] /1000
-    eng = _engine(page, [("vision_local", bad), ("vision_gemini", good)])
-    assert eng.do_step("click Search") == "vision_gemini"
+    good = Scripted({"action": "click", "point": [317, 500], "target": "Search"})  # [y, x] on /1000
+    eng = _engine(page, [("vision_local", bad), ("vision_local", good)])
+    assert eng.do_step("click Search") == "vision_local"
     assert "screen did not change" in bad.seen[1][1]  # retry got the failure as feedback
     atts = [(r["tier"], r["ok"]) for r in _log(eng) if r["kind"] == "attempt"]
-    assert atts == [("vision_local", False), ("vision_local", False), ("vision_gemini", True)], atts
+    assert atts == [("vision_local", False), ("vision_local", False), ("vision_local", True)], atts
+    assert len(good.seen) == 1
     print("ok retry with feedback, then next vision model")
 
     # 3. Typing by coordinates, verified by pixels around the field.
@@ -153,7 +154,7 @@ def run(page):
     load(page, CANVAS)
     down = Scripted(raise_error=ConnectionError("ollama not running"))
     nope = Scripted({"action": "fail", "reason": "no such thing"})
-    eng = _engine(page, [("vision_local", down), ("vision_gemini", nope)])
+    eng = _engine(page, [("vision_local", down), ("vision_local", nope)])
     try:
         eng.do_step("click the Checkout button")
         raise AssertionError("should fail")
@@ -197,23 +198,63 @@ def test_coords():
     print("ok coords")
 
 
-def test_providers_env():
-    for k in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "BE_ALLOW_CLAUDE_API"):
+def test_providers_local_only():
+    """Layer 2 must never reach a cloud or paid model, whatever keys are set."""
+    for k in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "BE_ALLOW_CLAUDE_API", "BE_NO_LOCAL", "BE_VISION"):
         os.environ.pop(k, None)
+    os.environ.update(GOOGLE_API_KEY="k", GEMINI_API_KEY="k", BE_ALLOW_CLAUDE_API="1",
+                      ANTHROPIC_API_KEY="k")
+    cfg = Config()
+    cfg.local_base_url = "http://127.0.0.1:9"  # nothing listening -> no local model installed
+    assert vision.providers(cfg) == []  # keys present, but nothing remote is ever added
+    cfg.local_base_url = "https://api.openai.com/v1"  # a cloud URL is refused outright
+    assert vision.providers(cfg) == []
+    try:
+        vision.OpenAIVision("https://generativelanguage.googleapis.com/v1beta/openai/", "k", "m")
+        raise AssertionError("accepted a cloud URL")
+    except ValueError:
+        pass
+    assert vision.is_local_url("http://localhost:11434/v1") and vision.is_local_url("http://127.0.0.1:1/v1")
+    assert not vision.is_local_url("http://192.168.1.5:11434/v1")
     os.environ["BE_NO_LOCAL"] = "1"
     assert vision.providers(Config()) == []
-    os.environ["GEMINI_API_KEY"] = "k"
-    assert [n for n, _ in vision.providers(Config())] == ["vision_gemini"]
-    os.environ["BE_VISION"] = "0"
-    assert vision.providers(Config()) == []
-    for k in ("GEMINI_API_KEY", "BE_VISION", "BE_NO_LOCAL"):
+    for k in ("GOOGLE_API_KEY", "GEMINI_API_KEY", "BE_ALLOW_CLAUDE_API", "ANTHROPIC_API_KEY", "BE_NO_LOCAL"):
         os.environ.pop(k, None)
-    print("ok providers from env")
+    print("ok layer 2 is local-only")
+
+
+def test_providers_list_and_missing():
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            body = json.dumps({"data": [{"id": "qwen2.5vl:7b"}, {"id": "qwen2.5:7b"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        cfg = Config()
+        cfg.local_base_url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+        cfg.vision_local_model = "qwen2.5vl:7b, llama3.2-vision"  # second one not pulled
+        got = vision.providers(cfg)
+        assert [(n, c.model) for n, c in got] == [("vision_local", "qwen2.5vl:7b")], got
+    finally:
+        srv.shutdown()
+    print("ok only installed local models are used")
 
 
 if __name__ == "__main__":
     test_coords()
-    test_providers_env()
+    test_providers_local_only()
+    test_providers_list_and_missing()
     with sync_playwright() as pw:
         b = pw.chromium.launch()
         page = b.new_page(viewport={"width": 800, "height": 600})

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tiered-browser-engine"
-version = "0.10.0"
+version = "0.10.1"
 description = "Token-saving tiered browser automation with an MCP server, an A2A (Google ADK) agent and a personal chat agent"
 requires-python = ">=3.10"
 dependencies = [

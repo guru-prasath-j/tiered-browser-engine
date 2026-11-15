@@ -209,12 +209,7 @@ class GuestBrowserService(BrowserService):
         self.last_obs = None
 
     def _engine(self, page, log, confirm_irreversible):
-        vision = self._get_vision()
-        if vision:  # remote guests only get the free local vision model, never your API keys
-            from .vision import VisionLayer
-
-            vision = VisionLayer([p for p in vision.providers if p[0] == "vision_local"],
-                                 self.cfg.vision_layer_tries) or None
+        vision = self._get_vision()  # local vision models only, never an API key
         return GuestEngine(page, self.cfg, self.cache, log, local=self._get_local(), claude=None,
                            guard=Guard(False), popups=self.popups, vision=vision)
 

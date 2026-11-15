@@ -1,7 +1,7 @@
 """The tiered engine.
 
 Layer 1 (reads the page's elements): rule -> cache -> label match -> local LLM -> Claude text/vision.
-Layer 2 (vision.py, screenshots only): local vision model -> Gemini -> Claude. Runs when layer 1
+Layer 2 (vision.py, screenshots only): local vision models ONLY (Ollama), never a paid API. Runs when layer 1
 gives up on a step, or straight away when the page has no readable elements.
 """
 import base64
@@ -22,7 +22,7 @@ from .llm import Usage, parse_json
 from .observer import observe, page_key
 from .safety import describe
 
-CLAUDE_TIERS = {"planner", "claude_text", "claude_vision", "vision_claude"}
+CLAUDE_TIERS = {"planner", "claude_text", "claude_vision"}
 
 
 class StepFailed(Exception):
