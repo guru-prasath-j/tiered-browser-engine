@@ -60,6 +60,12 @@ ollama pull qwen2.5:7b
 ollama pull qwen2.5vl:7b
 ```
 
+With the "eyes" model installed, the helper works in **careful mode**: before every step it looks
+at the screen, closes popups (only with buttons like "Maybe later" or "No thanks", never "Accept"),
+clicks the right button even when two look alike, and double-checks prices it reads against what's
+on screen. It's slower the first time on a new website, but it remembers what it saw, so repeating a
+task is fast.
+
 (The installer offers to do this for you if Ollama is already installed. It's about 11 GB, and a computer
 with 16 GB of memory or more works best.) Without them the helper still works, using Gemini for its
 thinking, but it can't look at screenshots. The black window shows which layers are on when it starts,

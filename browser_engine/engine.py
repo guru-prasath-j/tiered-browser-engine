@@ -89,6 +89,8 @@ class Engine:
         self.page, self.cfg, self.cache, self.log = page, cfg, cache, log
         self.vision = vision         # vision.VisionLayer (layer 2), or None
         self._value = None
+        self._look = None            # careful mode: what the eyes saw for the current step
+        self._n_extracted = 0
         self.local, self.claude, self.guard = local, claude, guard
         self.popups = popups         # PopupMemory, or None to never touch popups
         self.popups_closed = []      # labels clicked this run, returned to the caller
@@ -128,9 +130,13 @@ class Engine:
         key = norm_intent(intent)
         self.intent = intent
         self._value = value
+        self._look = None
+        self._n_extracted = len(self.extracted)
         self.human_gate()
         self.before_step()
         t0 = time.time()
+        if self._careful() and not key.startswith("answer"):
+            self._careful_look(key, intent, value)  # look first, close blockers (careful.py)
         try:
             before = observe(self.page, self.cfg.max_elements)
             blind = not before.elements
@@ -140,7 +146,8 @@ class Engine:
                            note=f"page elements unreadable: {err_text(e)}")
         if blind and self.vision and not key.startswith("answer"):
             # Nothing to read in the HTML (canvas, blocked scripts, shadow DOM...): go to layer 2.
-            tier = self._vision(key, intent, value, "the page shows no readable elements")
+            tier = self._vision(key, intent, value, "the page shows no readable elements"
+                                + (f"; {self._look_hint()}" if self._look else ""))
             if tier:
                 return self._done(key, tier, t0)
             self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000),
@@ -200,6 +207,27 @@ class Engine:
                         self.cache.put(d, p, key, entry)
                     return self._done(key, "match", t0)
                 feedback = f"clicking the element labelled like the intent did not work: {why}"
+
+        # Careful mode, tier "eyes": the element the vision model named, found in the HTML.
+        if self._look:
+            from . import careful
+
+            obs = observe(self.page, self.cfg.max_elements)
+            decision = careful.eyes_decision(self, intent, value, self._look, obs)
+            if decision:
+                action = decision["action"]
+                ok, why, entry = self.execute_decision(decision, action, value, obs)
+                self.log.write("attempt", intent=key, tier="eyes", ok=ok, action=action, note=why,
+                               **self._target(decision, obs), tokens_in=0, tokens_out=0)
+                if ok:
+                    if entry:
+                        d, p = page_key(obs.url)
+                        self.cache.put(d, p, key, entry)
+                    return self._done(key, "eyes", t0)
+                feedback = f"the element the screenshot pointed at did not work: {why}"
+                self.vision.look_cache and self.vision.look_cache.drop(self._look)
+            if not feedback:
+                feedback = self._look_hint()
 
         # Tiers 1-3: ask models, cheapest first.
         for tier, tries in self._tiers():
@@ -437,6 +465,82 @@ class Engine:
         if self.claude_tokens >= self.cfg.max_claude_tokens:
             raise BudgetExceeded(f"Claude token budget reached ({self.claude_tokens}/{self.cfg.max_claude_tokens})")
 
+    # ---- careful mode ----------------------------------------------------------
+    def _careful(self):
+        return getattr(self.cfg, "mode", "fast") == "careful" and bool(self.vision)
+
+    def _look_hint(self):
+        t = (self._look or {}).get("target") or {}
+        if not t.get("found") or not t.get("label"):
+            return None
+        return f'hint from the screenshot: the target looks like {t.get("role") or "an element"} "{t["label"]}"'
+
+    def _careful_look(self, key, intent, value):
+        """Look at the screen (cached per screenshot fingerprint), close what blocks it, remember
+        what the eyes saw for this step in self._look."""
+        from . import careful
+
+        lk = None
+        for _ in range(3):  # a closed popup can reveal another one
+            try:
+                lk, img, _h, info = careful.look(self, key, intent, value, self.vision, self.vision.look_cache)
+            except Exception as e:
+                self.log.write("attempt", intent=key, tier="look", ok=False, note=f"look failed: {err_text(e, 200)}")
+                return
+            if lk is None:
+                self.log.write("attempt", intent=key, tier="look", ok=False,
+                               note=f"no answer from the vision model: {info.get('error')}")
+                return
+            b, t = lk["blocker"], lk["target"]
+            parts = [lk.get("state") or ""]
+            if b["present"]:
+                parts.append(f'blocker: {b["kind"] or "popup"}' + (f' (close: "{b["close_label"]}")' if b["close_label"] else ""))
+            parts.append(f'target: {t["role"]} "{t["label"]}"' if t["found"] and t["label"] else "target not visible")
+            self.log.write("attempt", intent=key, tier="look", ok=True, note=" · ".join(p for p in parts if p)[:300],
+                           model=info.get("model"), cached=info.get("cached") or None, dist=info.get("dist"),
+                           target=f'{t["role"]} "{t["label"]}"' if t["label"] else None,
+                           xy=t.get("xy"), tokens_in=0 if info.get("cached") else None)
+            if not b["present"]:
+                break
+            if b["kind"].lower() == "captcha":
+                break  # bot checks are the user's job (human_gate)
+            how = careful.close_blocker(self, lk, img)
+            if not how:
+                self.log.write("attempt", intent=key, tier="look", ok=False,
+                               note=f'could not close the {b["kind"] or "popup"} safely '
+                                    f'(close label "{b["close_label"]}" is not a safe one or did nothing)')
+                if info.get("cached"):
+                    self.vision.look_cache.drop(lk)
+                break
+            label = b["close_label"] or how
+            self.popups_closed.append(label)
+            self.log.write("popup", intent=key, closed=[label], via=f"eyes: {how}", url=self.page.url)
+            if self.popups and b["close_label"] and careful.SAFE_CLOSE.match(b["close_label"]):
+                self.popups.learn(page_key(self.page.url)[0], [b["close_label"]])  # free next time
+        self._look = lk
+
+    def _read_check(self, key):
+        """Careful mode: compare data read from the HTML in this step with the screenshot."""
+        from . import careful
+
+        new = [x for x in self.extracted[self._n_extracted:] if x.get("source") != "screenshot"]
+        if not new:
+            return
+        try:
+            res = careful.check_read(self, self.vision, "\n".join(str(x.get("text", "")) for x in new))
+        except Exception as e:
+            res, err = None, err_text(e, 200)
+        else:
+            err = "no answer from the vision model"
+        if res is None:
+            self.log.write("attempt", intent=key, tier="read_check", ok=False, note=f"could not check: {err}")
+            return
+        for x in new:
+            x["screenshot_check"] = {k: v for k, v in res.items() if k != "model"}
+        self.log.write("attempt", intent=key, tier="read_check", ok=res["match"], model=res.get("model"),
+                       note=("matches the screenshot" if res["match"] else
+                             "differs from the screenshot: " + "; ".join(res["mismatches"]))[:300])
+
     def _vision(self, key, intent, value, feedback):
         """Layer 2: the same step from screenshots only. Returns the tier name or None."""
         def on_usage(tier, usage):
@@ -448,6 +552,8 @@ class Engine:
         return self.vision.run(self, key, intent, value, feedback, on_usage=on_usage)
 
     def _done(self, key, tier, t0):
+        if self._careful() and len(self.extracted) > self._n_extracted:
+            self._read_check(key)
         self.tiers_used[tier] += 1
         self.log.write("step", intent=key, tier=tier, ok=True, ms=int((time.time() - t0) * 1000),
                        url=self._url(), value=log_value(self.intent, self._value))

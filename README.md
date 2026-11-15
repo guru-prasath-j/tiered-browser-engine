@@ -216,6 +216,32 @@ Environment variables: `BE_LOCAL_BASE_URL`, `BE_LOCAL_MODEL`, `BE_CLAUDE_TEXT_MO
 | `guest.py` | Guest mode for remote callers: isolated browser, URL policy, login-wall stop. |
 | `a2a_agent.py` | Google ADK agent + A2A server with bearer auth. |
 
+## Careful mode: look first, act through the HTML (v0.13)
+
+`BE_MODE=careful` (the default in Browser Helper when a local vision model is installed) makes every
+step work like a person: the local vision model **looks** at the screen first, then the engine **acts**
+through the HTML, which is exact.
+
+1. **Look:** screenshot → local vision model → is something blocking (cookie banner, login nag, promo
+   popup)? Which element does the step need (visible label + position)?
+2. **Unblock:** Escape, or the popup's close control by label. Only safe labels are ever clicked
+   ("Maybe later", "No thanks", "×", "Reject all", "Continue as guest" …), never "Accept" or "Sign up".
+   Captchas are left to the user. Learned close labels go to the popup memory, so next time it's free.
+3. **Act:** cache → label match → **eyes** (the element the vision model named, found in the HTML by
+   label and nearest to where it was seen; picks the right one of two look-alike buttons) → local LLM
+   (told what the eyes saw) → layer 2 (act from the screenshot).
+4. **Check reads:** data from the HTML is compared with the screenshot. Each extracted item gets
+   `"screenshot_check": {"match": …, "mismatches": […]}`, and the agent is told not to present a
+   mismatching value as certain.
+
+**Look cache:** what the eyes saw is saved per page + step + screen fingerprint (a 64-bit dHash of the
+layout plus a 4×4 brightness grid, so a dark popup over the same page counts as a different screen).
+A repeated screen costs **no vision call**; actions found through the eyes go into the normal step cache.
+`browser-engine cache clear` clears both. Fast mode (`BE_MODE=fast`, the MCP default) is unchanged.
+
+Cost: one local vision call per new screen, about 10–20 s on a laptop; repeated screens are instant.
+In the log viewer, careful steps show `👁 look` (with "(cached)"), `👁 eyes → HTML` and `👁 check read`.
+
 ## Two layers: page elements first, screenshots second (v0.10)
 
 | Layer | Reads | Tiers, cheapest first |
@@ -383,6 +409,7 @@ The observer does not look inside iframes or shadow DOM yet, so those pages fall
 
 ```bash
 python tests/test_engine.py && python tests/test_mcp.py && python tests/test_extract.py
+python tests/test_careful.py  # careful mode: popup close, look cache, look-alike buttons, read check
 python tests/test_vision.py   # layer 2: local-only, blind pages, retries, typing, reading, guard (real Chromium)
 python tests/test_logviz.py  # visual logs: 24h pruning, run grouping, viewer server
 python tests/test_home.py    # home agent chat page, settings, model choice (needs .[home])

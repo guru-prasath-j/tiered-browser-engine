@@ -109,7 +109,10 @@ def cmd_cache(args, cfg):
     cache = ActionCache(cfg.cache_path)
     if args.op == "clear":
         cache.clear(args.domain)
-        print("cleared" + (f" {args.domain}" if args.domain else " everything"))
+        from .careful import LookCache
+
+        LookCache(cfg.cache_path).clear(args.domain)
+        print("cleared" + (f" {args.domain}" if args.domain else " everything") + " (actions + saved looks)")
     else:
         for domain, page, intent, hits, fails, entry in cache.list(args.domain):
             e = json.loads(entry)

@@ -179,7 +179,10 @@ class BrowserService:
             from .vision import VisionLayer, providers
 
             try:
-                self._vision = VisionLayer(providers(self.cfg), self.cfg.vision_layer_tries)
+                from .careful import LookCache
+
+                self._vision = VisionLayer(providers(self.cfg), self.cfg.vision_layer_tries,
+                                           look_cache=LookCache(self.cfg.cache_path))
             except Exception as e:
                 print(f"[browser-engine] screenshot layer disabled: {e}", file=sys.stderr)
                 self._vision = False
@@ -250,7 +253,7 @@ class BrowserService:
         StepLog(self.cfg.log_path, run_id=f"session-{os.getpid()}").write(
             "session", version=logviz.engine_version(), python=platform.python_version(),
             os=f"{platform.system()} {platform.release()} {platform.machine()}",
-            mode=type(self).__name__, local_model=self.cfg.local_model, local_url=self.cfg.local_base_url,
+            mode=type(self).__name__, engine_mode=self.cfg.mode, local_model=self.cfg.local_model, local_url=self.cfg.local_base_url,
             local_up=_http_ok(self.cfg.local_base_url.rstrip("/") + "/models"),
             vision_models=[getattr(c, "model", n) for n, c in (vision.providers if vision else [])],
             claude_api=os.getenv("BE_ALLOW_CLAUDE_API") == "1", cdp=self.cdp, env=env)
@@ -493,6 +496,9 @@ class BrowserService:
     def cache_op(self, op="list", domain=None):
         if op == "clear":
             self.cache.clear(domain)
+            v = self._get_vision()
+            if v and v.look_cache:
+                v.look_cache.clear(domain)
             if self.popups:
                 self.popups.clear(domain)
             return {"cleared": domain or "everything"}

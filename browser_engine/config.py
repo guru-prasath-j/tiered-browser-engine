@@ -24,6 +24,10 @@ class Config:
     claude_text_tries: int = 2
     vision_tries: int = 1
 
+    # "fast": HTML first, screenshots only when that fails. "careful" (careful.py): look at the
+    # screen with the local vision model before every step, then act through the HTML.
+    mode: str = field(default_factory=lambda: _env("BE_MODE", "fast").strip().lower())
+
     # Layer 2 (vision.py): decide from screenshots when the HTML can't be read or layer 1 gave up
     # Local models only (comma-separated fallback list); layer 2 never calls a cloud API.
     vision_local_model: str = field(default_factory=lambda: _env("BE_VISION_LOCAL_MODEL", "qwen2.5vl:7b"))

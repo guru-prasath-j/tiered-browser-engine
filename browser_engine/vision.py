@@ -237,9 +237,10 @@ def providers(cfg):
 class VisionLayer:
     """Runs one step from screenshots. Engine-agnostic: needs page, cfg, guard, log callbacks."""
 
-    def __init__(self, provider_list, tries=2):
+    def __init__(self, provider_list, tries=2, look_cache=None):
         self.providers = list(provider_list)
         self.tries = max(1, int(tries))
+        self.look_cache = look_cache  # careful.LookCache: what the eyes saw, per screen
 
     def __bool__(self):
         return bool(self.providers)

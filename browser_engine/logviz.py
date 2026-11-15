@@ -196,7 +196,7 @@ def _read(path):
 
 
 ATTEMPT_KEYS = ("ts", "dt_ms", "tier", "ok", "action", "note", "tokens_in", "tokens_out", "layer", "model",
-                "raw", "ref", "target", "selector", "seen")
+                "raw", "ref", "target", "selector", "seen", "cached", "xy")
 STALE_RUN_S = 600  # a run with no end line and no activity for 10 min was interrupted (crash, kill)
 
 
@@ -506,7 +506,7 @@ details.more>summary{cursor:pointer;font-size:12px;color:var(--muted);margin-top
 <dialog id="dlg"><img id="big" alt=""></dialog>
 <script>
 const API='__API__',SHOTS='__SHOTS__';let data=null,filter='all',open=new Set();
-const TIER={rule:'rule',cache:'cache',match:'label match',local:'local LLM',claude_text:'Claude text',claude_vision:'Claude vision',manual:'manual (agent)',planner:'planner',dom:'read page',vision_local:'📷 local vision'};
+const TIER={rule:'rule',cache:'cache',match:'label match',local:'local LLM',claude_text:'Claude text',claude_vision:'Claude vision',manual:'manual (agent)',planner:'planner',dom:'read page',vision_local:'📷 local vision',look:'👁 look',eyes:'👁 eyes → HTML',read_check:'👁 check read'};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const t=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 const ago=s=>s<60?Math.round(s)+'s':s<3600?Math.round(s/60)+'m':(s/3600).toFixed(1)+'h';
@@ -538,8 +538,8 @@ function tiles(){const s=data.summary,st=s.by_status;
 function chain(st){if(!st.attempts.length)return st.tier?`<span class="a ok">${esc(TIER[st.tier]||st.tier)}</span>`:'';
  return st.attempts.map(a=>{if(a.tier==='layer2')return '<span class="lay" title="'+esc(a.note||'')+'">layer 2: screenshots</span>';
   const tok=(a.tokens_in||0)+(a.tokens_out||0);
-  const tip=[a.model,a.action&&(a.action+(a.ref?' '+a.ref:'')),a.target,a.selector,a.note].filter(Boolean).join(' · ');
-  return `<span class="a ${a.ok?'ok':'bad'}" title="${esc(tip)}">${a.ok?'✓':'✗'} ${esc(TIER[a.tier]||a.tier)}${a.dt_ms!=null?' · '+dur(a.dt_ms):''}${tok?` · ${tok} tok`:''}</span>`}).join('<span class="arrow">→</span>')}
+  const tip=[a.cached?'from look cache':'',a.model,a.action&&(a.action+(a.ref?' '+a.ref:'')),a.target,a.selector,a.note].filter(Boolean).join(' · ');
+  return `<span class="a ${a.ok?'ok':'bad'}" title="${esc(tip)}">${a.ok?'✓':'✗'} ${esc(TIER[a.tier]||a.tier)}${a.cached?' (cached)':''}${a.dt_ms!=null?' · '+dur(a.dt_ms):''}${tok?` · ${tok} tok`:''}</span>`}).join('<span class="arrow">→</span>')}
 function why(st){const fails=st.attempts.filter(a=>a.ok===false&&(a.note||a.raw));if(!fails.length||!(!st.ok||st.retried))return '';
  return '<ul class="why">'+fails.map(a=>`<li><b>${esc(TIER[a.tier]||a.tier)}</b>${a.model?' <span class="muted">('+esc(a.model)+')</span>':''}${a.action?' '+esc(a.action):''}${a.target?' → '+esc(a.target):a.ref?' → '+esc(a.ref):''}: ${esc(a.note||'')}${a.dt_ms!=null?' <span class="muted">· '+dur(a.dt_ms)+'</span>':''}${a.seen?` <a class="seen" href="${shot(a.seen)}" target="_blank">what the model saw</a>`:''}${a.raw?'<div class="raw">model replied: '+esc(a.raw)+'</div>':''}</li>`).join('')+'</ul>'}
 function step(st,i){const bad=!st.ok, cls=bad?'bad':st.retried?'retry':'ok';
