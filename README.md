@@ -266,6 +266,27 @@ moment it failed** (bot checks and blocked/irreversible steps too). Filters: Fai
 (succeeded only after a failed attempt), Needs you (bot check). It also shows "Where failures happen
 most", tier mix and token use. The page refreshes every 10 s.
 
+**What is logged** (`~/.browser_engine/steps.jsonl`, one JSON line each, all with `ts`, `run_id` and
+`dt_ms` = time since the run's previous line, so every lag is visible):
+
+| Line | When | Key fields |
+|---|---|---|
+| `session` | once per process | engine version, OS, mode (owner / guest), local model + up/down, screenshot-layer models, Claude API on/off, `BE_*` settings (secrets masked) |
+| `run_start` | before anything runs | goal, start URL, full plan (values masked for secrets) |
+| `nav` | opening the start URL | URL, final URL after redirects, HTTP status, ms, error |
+| `attempt` | every try of every tier | tier, model, action, ref + target element, cached selector, ok, reason, tokens, raw model reply on failure, what layer 2 was shown (`seen` image) |
+| `step` | end of each step | ok, winning tier, ms, URL, value (masked), manual action/target for `do_browser_step` |
+| `shot` | a step fails / bot check / blocked / crash | screenshot, error with the real cause (e.g. `<div class=modal> intercepts pointer events`), the elements near the step |
+| `popup`, `human`, `human_wait` | popups closed, bot checks, waiting for you | labels, challenge, solved or not, ms |
+| `error` | unexpected exception | message, type, traceback |
+| `run` | end of run | ok / failed / blocked / needs_human / crashed, tiers, tokens |
+
+Clicks that only got through with a fallback (scroll, DOM click) say so and name what covered the target.
+`calls.jsonl` has one line per MCP tool call and per Browser Helper chat turn and tool call. The viewer
+shows runs as OK / Failed / Blocked / Bot check / Crashed / Interrupted (no end line for 10 min), plus
+"Where the time goes" (total and average time per tier) and the slowest steps. `BE_LOG_VALUES=0` hides
+typed values; secrets (password/OTP/card) are never logged.
+
 **24-hour retention:** `steps.jsonl`, `calls.jsonl` and failure screenshots (`~/.browser_engine/shots/`)
 older than 24 hours are deleted when the engine starts, every 10 minutes while it runs, and whenever the
 log page loads. Each run shows its own countdown ("deleted in 3.2h"). Env: `BE_LOG_RETENTION_HOURS`

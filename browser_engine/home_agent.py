@@ -97,12 +97,43 @@ def _service():
     return _svc
 
 
+_calllog = None
+
+
+def _logged(method, args, kw):
+    """Runs on the browser thread; every tool call goes to calls.jsonl like the MCP server's."""
+    global _calllog
+    svc = _service()
+    if _calllog is None:
+        try:
+            from .calllog import CallLog
+
+            _calllog = CallLog(svc.cfg.calls_path, svc.cfg.log_path)
+        except Exception:  # logging must never block a tool call
+            return getattr(svc, method)(*args, **kw)
+    names = ("goal", "steps", "start_url") if method == "run_plan" else ()
+    log_args = dict(zip(names, args)) if names else {"args": [str(a)[:120] for a in args]}
+    if method == "run_plan" and log_args.get("steps"):
+        log_args["steps"] = list(log_args["steps"])
+    log_args.update({k: v for k, v in kw.items() if v is not None})
+    token = _calllog.start()
+    try:
+        out = getattr(svc, method)(*args, **kw)
+    except Exception as e:
+        _calllog.finish(token, f"home:{method}", log_args, error=e)
+        raise
+    _calllog.finish(token, f"home:{method}", log_args, result=out)
+    return out
+
+
 async def _call(method, *args, **kw):
     loop = asyncio.get_running_loop()
     try:
-        return await loop.run_in_executor(_pool, lambda: getattr(_service(), method)(*args, **kw))
+        return await loop.run_in_executor(_pool, lambda: _logged(method, args, kw))
     except Exception as e:  # keep the chat alive: the model reads the error and explains it
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:400]}
+        from .logviz import err_text
+
+        return {"ok": False, "error": f"{type(e).__name__}: {err_text(e, 400)}"}
 
 
 def _parse_steps(steps):
@@ -291,20 +322,43 @@ class Chat:
         return s.id
 
     async def ask(self, sid, text):
+        import time
+
+        from .logviz import append_jsonl, err_text
+
+        t0, err, reply, tools = time.time(), None, None, 0
+        try:
+            sid, reply, tools = await self._ask(sid, text)
+            return sid, reply
+        except Exception as e:
+            err = err_text(e, 400)
+            raise
+        finally:  # one line per chat turn in calls.jsonl (kept 24h like everything else)
+            try:
+                append_jsonl(Config().calls_path, {
+                    "ts": round(t0, 3), "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t0)),
+                    "tool": "home:chat", "query": {"message": text[:300]}, "ok": err is None,
+                    "ms": int((time.time() - t0) * 1000), "tool_calls": tools,
+                    "reply": (reply or "")[:300] or None, "error": err, "session": (sid or "")[:12]})
+            except Exception:
+                pass
+
+    async def _ask(self, sid, text):
         from google.genai import types
 
         async with self.lock:
             sid = await self._session(sid or uuid.uuid4().hex)
             msg = types.Content(role="user", parts=[types.Part(text=text)])
-            final, last = "", ""
+            final, last, tools = "", "", 0
             async for ev in self.runner.run_async(user_id=USER_ID, session_id=sid, new_message=msg):
                 parts = getattr(getattr(ev, "content", None), "parts", None) or []
+                tools += sum(1 for p in parts if getattr(p, "function_call", None))
                 txt = "".join(p.text for p in parts if getattr(p, "text", None))
                 if txt:
                     last = txt
                     if ev.is_final_response():
                         final = txt
-            return sid, (final or last or "Sorry, I didn't get an answer. Please try again.")
+            return sid, (final or last or "Sorry, I didn't get an answer. Please try again."), tools
 
 
 # ---- web page ------------------------------------------------------------------

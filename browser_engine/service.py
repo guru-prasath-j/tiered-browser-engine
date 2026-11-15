@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 
 from .cache import ActionCache, norm_intent
@@ -104,6 +105,7 @@ class BrowserService:
         self._claude = claude
         self._site_memory = None
         self._vision = None if os.getenv("BE_VISION") != "0" else False
+        self._session_logged = False
         logviz.maybe_prune(self.cfg)
 
     # ---- wiring ----------------------------------------------------------
@@ -234,15 +236,65 @@ class BrowserService:
             res["saved_as"] = task_name
         return res
 
+    def _log_session(self):
+        """Once per process: engine version and setup, so any log line can be traced to the code
+        and models that produced it."""
+        if self._session_logged:
+            return
+        self._session_logged = True
+        vision = self._get_vision()
+        env = {k: (v if not any(s in k for s in ("KEY", "TOKEN", "SECRET")) else "<set>")
+               for k, v in os.environ.items() if k.startswith("BE_")}
+        import platform
+
+        StepLog(self.cfg.log_path, run_id=f"session-{os.getpid()}").write(
+            "session", version=logviz.engine_version(), python=platform.python_version(),
+            os=f"{platform.system()} {platform.release()} {platform.machine()}",
+            mode=type(self).__name__, local_model=self.cfg.local_model, local_url=self.cfg.local_base_url,
+            local_up=_http_ok(self.cfg.local_base_url.rstrip("/") + "/models"),
+            vision_models=[getattr(c, "model", n) for n, c in (vision.providers if vision else [])],
+            claude_api=os.getenv("BE_ALLOW_CLAUDE_API") == "1", cdp=self.cdp, env=env)
+
     def _run_plan(self, goal, steps, start_url=None, confirm_irreversible=False):
         steps = normalize_steps(steps)
         logviz.maybe_prune(self.cfg)
-        page = self._get_page()
+        self._log_session()
         log = StepLog(self.cfg.log_path)
+        # Written first, so a run that hangs or crashes still shows its goal and plan.
+        log.write("run_start", goal=goal, start_url=start_url, confirm=bool(confirm_irreversible) or None,
+                  plan=[{"intent": s["intent"], "value": logviz.log_value(s["intent"], s["value"])}
+                        for s in steps])
+        try:
+            return self._run_plan_inner(log, goal, steps, start_url, confirm_irreversible)
+        except Exception as e:  # anything unexpected: log it with the traceback, then re-raise
+            import traceback
+
+            page = self.page
+            if page is not None:
+                try:
+                    self._failure_shot(page, log, None, reason="crash", error=logviz.err_text(e))
+                except Exception:
+                    pass
+            log.write("error", error=logviz.err_text(e, 800), type=type(e).__name__,
+                      trace=traceback.format_exc()[-2000:])
+            log.write("run", ok=False, goal=goal, crashed=True)
+            raise
+
+    def _run_plan_inner(self, log, goal, steps, start_url, confirm_irreversible):
+        page = self._get_page()
         eng = self._engine(page, log, confirm_irreversible)
         if start_url:
             eng.target_url = start_url
-            page.goto(start_url, wait_until="domcontentloaded")
+            t_nav = time.time()
+            try:
+                resp = page.goto(start_url, wait_until="domcontentloaded")
+            except Exception as e:
+                log.write("nav", url=start_url, ok=False, ms=int((time.time() - t_nav) * 1000),
+                          error=logviz.err_text(e))
+                raise
+            log.write("nav", url=start_url, final_url=page.url[:300] if page.url != start_url else None,
+                      status=getattr(resp, "status", None), ok=True, ms=int((time.time() - t_nav) * 1000),
+                      title=(page.title() or "")[:120])
         done = 0
         try:
             for st in steps:
@@ -315,19 +367,33 @@ class BrowserService:
             url = page.url[:300]
         except Exception:
             url = None
+        near = None
+        try:  # the elements a person would look at for this step, to see what the engine saw
+            obs = observe(page, self.cfg.max_elements)
+            near = [e.line()[:140] for e in obs.subset(intent or "", self.cfg.report_elements).elements]
+            n_els = len(obs.elements)
+        except Exception as e:
+            n_els = None
+            near = [f"(could not read elements: {logviz.err_text(e, 150)})"]
         log.write("shot", file=name, intent=intent, url=url, reason=reason,
-                  error=(error or "")[:300] or None)
+                  error=(error or "")[:500] or None, elements=near, n_elements=n_els)
 
     def wait_human(self, timeout_s=50, resume_url=None):
         """Wait for the user to clear a bot check, then optionally reopen resume_url."""
         page = self._get_page()
         self.last_obs = None
+        log = StepLog(self.cfg.log_path)
+        t0 = time.time()
         reason = human.detect(page)
         if reason:
             human.notify(page, reason)
             if not human.wait_until_clear(page, max(5, min(int(timeout_s), 55))):
+                log.write("human_wait", challenge=reason, resolved=False, url=page.url[:300],
+                          ms=int((time.time() - t0) * 1000))
                 return {"resolved": False, "challenge": reason, "url": page.url,
                         "next": "Still waiting. Remind the user to solve it in Chrome, then call wait_for_human again."}
+            log.write("human_wait", challenge=reason, resolved=True, url=page.url[:300],
+                      ms=int((time.time() - t0) * 1000))
         if resume_url and not human.same_target(page.url, resume_url):
             page.goto(resume_url, wait_until="domcontentloaded")
             again = human.detect(page)
@@ -356,6 +422,8 @@ class BrowserService:
         try:
             ok, why, entry = eng.execute_decision(decision, action, value, obs)
         except Blocked as e:
+            log.write("step", intent=norm_intent(intent), tier="manual", ok=False, blocked=True,
+                      note=str(e)[:300], action=action, ref=ref)
             return {"ok": False, "blocked": True, "error": str(e)}
         finally:
             self.last_obs = None  # refs are stale after any action
@@ -364,7 +432,10 @@ class BrowserService:
             d, p = page_key(obs.url)
             self.cache.put(d, p, norm_intent(intent), entry)
             learned = True
-        log.write("step", intent=norm_intent(intent), tier="manual", ok=ok, note=why, url=page.url[:300])
+        el = obs.by_ref.get(ref) if isinstance(ref, str) else None
+        log.write("step", intent=norm_intent(intent), tier="manual", ok=ok, note=why, url=page.url[:300],
+                  action=action, ref=ref, target=f'{el.role} "{el.name[:60]}"' if el else None,
+                  value=logviz.log_value(intent, value if value is not None else text))
         if not ok:
             self._failure_shot(page, log, norm_intent(intent), reason="manual step failed", error=why)
         out = {"ok": ok, "note": why, "learned": learned, "url": page.url}

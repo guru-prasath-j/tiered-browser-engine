@@ -13,6 +13,7 @@ import uuid
 from collections import Counter
 
 from .cache import norm_intent
+from .logviz import err_text, log_value
 from . import human
 from . import popups as popup_mod
 from . import forms
@@ -45,11 +46,16 @@ class StepLog:
     def __init__(self, path, run_id=None):
         self.path = path
         self.run_id = run_id or uuid.uuid4().hex[:10]
+        self._last = time.time()
 
     def write(self, kind, **fields):
         from .logviz import append_jsonl
 
-        rec = {"ts": round(time.time(), 3), "run_id": self.run_id, "kind": kind, **fields}
+        now = time.time()
+        # dt_ms: time since this run's previous log line = how long this attempt / wait / call took
+        rec = {"ts": round(now, 3), "run_id": self.run_id, "kind": kind,
+               "dt_ms": int((now - self._last) * 1000), **{k: v for k, v in fields.items() if v is not None}}
+        self._last = now
         try:
             append_jsonl(self.path, rec)
         except OSError:
@@ -82,6 +88,7 @@ class Engine:
                  vision=None):
         self.page, self.cfg, self.cache, self.log = page, cfg, cache, log
         self.vision = vision         # vision.VisionLayer (layer 2), or None
+        self._value = None
         self.local, self.claude, self.guard = local, claude, guard
         self.popups = popups         # PopupMemory, or None to never touch popups
         self.popups_closed = []      # labels clicked this run, returned to the caller
@@ -120,6 +127,7 @@ class Engine:
     def do_step(self, intent, value=None):
         key = norm_intent(intent)
         self.intent = intent
+        self._value = value
         self.human_gate()
         self.before_step()
         t0 = time.time()
@@ -129,7 +137,7 @@ class Engine:
         except Exception as e:
             before, blind = None, True
             self.log.write("attempt", intent=key, tier="dom", ok=False,
-                           note=f"page elements unreadable: {str(e).splitlines()[0][:150]}")
+                           note=f"page elements unreadable: {err_text(e)}")
         if blind and self.vision and not key.startswith("answer"):
             # Nothing to read in the HTML (canvas, blocked scripts, shadow DOM...): go to layer 2.
             tier = self._vision(key, intent, value, "the page shows no readable elements")
@@ -161,7 +169,8 @@ class Engine:
         if hit:
             hit_page, entry = hit
             ok, why = self._replay(entry, value, before)
-            self.log.write("attempt", intent=key, tier="cache", ok=ok, note=why, tokens_in=0, tokens_out=0)
+            self.log.write("attempt", intent=key, tier="cache", ok=ok, note=why, action=entry.get("action"),
+                           selector=(entry.get("selectors") or [None])[0], tokens_in=0, tokens_out=0)
             if ok:
                 self.cache.hit(domain, hit_page, key)
                 return self._done(key, "cache", t0)
@@ -184,7 +193,7 @@ class Engine:
                 action = decision["action"]
                 ok, why, entry = self.execute_decision(decision, action, value, obs)
                 self.log.write("attempt", intent=key, tier="match", ok=ok, action=action, note=why,
-                               tokens_in=0, tokens_out=0)
+                               **self._target(decision, obs), tokens_in=0, tokens_out=0)
                 if ok:
                     if entry:
                         d, p = page_key(obs.url)
@@ -206,8 +215,8 @@ class Engine:
                 except Exception as e:
                     if tier == "local":
                         self.local_down = True
-                        self.log.write("attempt", intent=key, tier=tier, ok=False,
-                                       note=f"local LLM unavailable: {str(e)[:150]}")
+                        self.log.write("attempt", intent=key, tier=tier, ok=False, model=self._model(tier),
+                                       note=f"local LLM unavailable: {err_text(e, 200)}")
                         break
                     raise
                 self._account(tier, usage)
@@ -216,11 +225,14 @@ class Engine:
                 try:
                     decision = parse_json(raw)
                 except ValueError as e:
-                    self.log.write("attempt", intent=key, tier=tier, ok=False, note=str(e), **tok)
+                    self.log.write("attempt", intent=key, tier=tier, ok=False, note=str(e)[:200],
+                                   model=self._model(tier), raw=str(raw)[:300], **tok)
                     feedback = "your previous reply was not valid JSON; reply with only the JSON object"
                     continue
 
                 if not isinstance(decision, dict):
+                    self.log.write("attempt", intent=key, tier=tier, ok=False, note="reply was not a JSON object",
+                                   model=self._model(tier), raw=str(raw)[:300], **tok)
                     feedback = "reply with one JSON object"
                     continue
                 if tier == "local":
@@ -232,19 +244,24 @@ class Engine:
                     # Small models sometimes claim "done" too early; sanity-check when we can.
                     if tier == "local" and value is not None and value.lower() not in obs.text.lower():
                         self.log.write("attempt", intent=key, tier=tier, ok=False, action=action,
-                                       note="claimed done but value not on page", **tok)
+                                       note="claimed done but value not on page", model=self._model(tier),
+                                       raw=str(raw)[:300], **tok)
                         feedback = "the intent is NOT done yet: the value is not present on the page"
                         continue
-                    self.log.write("attempt", intent=key, tier=tier, ok=True, action=action, note=reason, **tok)
+                    self.log.write("attempt", intent=key, tier=tier, ok=True, action=action, note=reason,
+                                   model=self._model(tier), **tok)
                     return self._done(key, tier, t0)
 
                 if action == "fail":
-                    self.log.write("attempt", intent=key, tier=tier, ok=False, action=action, note=reason, **tok)
+                    self.log.write("attempt", intent=key, tier=tier, ok=False, action=action, note=reason,
+                                   model=self._model(tier), raw=str(raw)[:300], **tok)
                     feedback = f"a previous model could not do it: {reason}"
                     break
 
                 ok, why, entry = self.execute_decision(decision, action, value, obs)
-                self.log.write("attempt", intent=key, tier=tier, ok=ok, action=action, note=why, **tok)
+                self.log.write("attempt", intent=key, tier=tier, ok=ok, action=action, note=why,
+                               model=self._model(tier), **self._target(decision, obs),
+                               raw=None if ok else str(raw)[:300], **tok)
                 if ok:
                     if entry:  # learner: next time this step costs nothing
                         d, p = page_key(obs.url)
@@ -257,7 +274,7 @@ class Engine:
             if tier:
                 return self._done(key, tier, t0)
         self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000),
-                       url=self._url(), note=(feedback or "")[:300] or None)
+                       url=self._url(), value=log_value(intent, value), note=(feedback or "")[:300] or None)
         raise StepFailed(f"could not complete step '{intent}': {feedback}")
 
     def before_step(self):
@@ -360,11 +377,13 @@ class Engine:
             ok, why = self._extract(loc)
         else:
             try:
-                perform(self.page, action, loc, text, decision, self.cfg.settle_ms)
+                how = perform(self.page, action, loc, text, decision, self.cfg.settle_ms)
             except Exception as e:
-                return False, f"{action} raised: {str(e).splitlines()[0][:200]}", None
+                return False, f"{action} raised: {err_text(e)}", None
             ok, why, met = verify_ex(self.page, action, obs, loc, text, decision.get("expect"),
                                      self.cfg.max_elements)
+            if how:
+                why = f"{why} [{how}]"
         if not ok:
             return False, why, None
         if action == "extract":
@@ -394,16 +413,17 @@ class Engine:
         if action == "extract":
             return self._extract(loc)
         try:
-            perform(self.page, action, loc, text, entry, self.cfg.settle_ms)
+            how = perform(self.page, action, loc, text, entry, self.cfg.settle_ms)
         except Exception as e:
-            return False, f"{action} raised: {str(e).splitlines()[0][:200]}"
-        return verify(self.page, action, before, loc, text, entry.get("expect"), self.cfg.max_elements)
+            return False, f"{action} raised: {err_text(e)}"
+        ok, why = verify(self.page, action, before, loc, text, entry.get("expect"), self.cfg.max_elements)
+        return ok, (f"{why} [{how}]" if how else why)
 
     def _extract(self, loc):
         try:
             text = extract_text(loc)
         except Exception as e:
-            return False, f"extract raised: {str(e).splitlines()[0][:200]}"
+            return False, f"extract raised: {err_text(e)}"
         if not text or len(text.strip()) < 3:
             return False, "nothing readable around that element"
         self.extracted.append({"intent": self.intent, "text": text})
@@ -430,8 +450,26 @@ class Engine:
     def _done(self, key, tier, t0):
         self.tiers_used[tier] += 1
         self.log.write("step", intent=key, tier=tier, ok=True, ms=int((time.time() - t0) * 1000),
-                       url=self._url())
+                       url=self._url(), value=log_value(self.intent, self._value))
         return tier
+
+    def _model(self, tier):
+        client = {"local": self.local}.get(tier) or (self.claude if tier.startswith("claude") else None)
+        if tier == "claude_text":
+            return getattr(self.cfg, "claude_text_model", None)
+        if tier == "claude_vision":
+            return getattr(self.cfg, "claude_vision_model", None)
+        return getattr(client, "model", None)
+
+    @staticmethod
+    def _target(decision, obs):
+        """What the action was aimed at, for the log: ref, and the element's role + name."""
+        ref = decision.get("ref")
+        el = obs.by_ref.get(ref) if isinstance(ref, str) else None
+        out = {"ref": ref if isinstance(ref, str) else (str(ref)[:60] if ref else None)}
+        if el is not None:
+            out["target"] = f"{el.role} \"{el.name[:60]}\""
+        return out
 
     def _url(self):
         try:

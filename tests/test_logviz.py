@@ -83,7 +83,7 @@ def test_build_runs():
     log4.write("shot", file=None, intent="open results", reason="bot check", error="captcha")
     log4.write("run", ok=False, goal="flights", needs_human=True)
 
-    runs = logviz.build_runs(cfg)
+    runs, _ = logviz.build_runs(cfg)
     by = {r["run_id"]: r for r in runs}
     assert [r["run_id"] for r in runs] == ["r4", "r3", "r2", "r1"]  # newest first
     r1 = by["r1"]
@@ -140,6 +140,72 @@ def test_server():
             assert e.code == 403
     finally:
         srv.shutdown()
+
+
+def test_err_text_keeps_the_cause():
+    e = Exception("Locator.click: Timeout 5000ms exceeded.\nCall log:\n  - waiting for locator('[data-be-ref=e4]')\n"
+                  "  - element is visible, enabled and stable\n  - scrolling into view if needed\n"
+                  "  - <div class=\"modal-backdrop\"></div> intercepts pointer events\n  - retrying click action")
+    t = logviz.err_text(e)
+    assert t.startswith("Locator.click: Timeout 5000ms exceeded.") and "intercepts pointer events" in t, t
+    assert "scrolling into view" not in t
+
+
+def test_log_value_masks_secrets():
+    os.environ.pop("BE_LOG_VALUES", None)
+    assert logviz.log_value("type into the city box", "Chennai") == "Chennai"
+    assert logviz.log_value("type the password", "hunter2") == "<secret>"
+    assert logviz.log_value("type card", "4111 1111 1111 1111") == "<secret>"
+    os.environ["BE_LOG_VALUES"] = "0"
+    assert logviz.log_value("type into the city box", "Chennai") == "<hidden>"
+    os.environ.pop("BE_LOG_VALUES")
+    assert logviz.log_value("x", None) is None
+
+
+def test_run_lifecycle_and_sessions():
+    cfg = _cfg()
+    now = time.time()
+    StepLog(cfg.log_path, run_id="session-1").write("session", version="0.11.0", local_model="qwen2.5:7b")
+    # interrupted: run_start, one attempt, then nothing for 20 minutes
+    _write(cfg.log_path, [
+        {"ts": now - 1200, "run_id": "i", "kind": "run_start", "goal": "cheap flights",
+         "plan": [{"intent": "click search", "value": None}]},
+        {"ts": now - 1199, "run_id": "i", "kind": "attempt", "tier": "local", "ok": False, "dt_ms": 9000,
+         "note": "x", "raw": "{bad"}])
+    # crashed
+    log = StepLog(cfg.log_path, run_id="c")
+    log.write("run_start", goal="g", plan=[])
+    log.write("nav", url="https://a.test", ok=True, ms=800, status=200)
+    log.write("error", error="RuntimeError: boom", type="RuntimeError", trace="Traceback ...")
+    log.write("run", ok=False, goal="g", crashed=True)
+    # still running (recent, no end)
+    StepLog(cfg.log_path, run_id="r").write("run_start", goal="live", plan=[])
+    # a lone wait_for_human call
+    StepLog(cfg.log_path, run_id="h").write("human_wait", challenge="captcha", resolved=True, ms=12000)
+    runs, sessions = logviz.build_runs(cfg)
+    by = {r["run_id"]: r for r in runs}
+    assert sessions and sessions[0]["version"] == "0.11.0"
+    assert "session-1" not in by
+    assert by["i"]["status"] == "interrupted" and by["i"]["goal"] == "cheap flights"
+    assert by["i"]["steps"][0]["attempts"][0]["raw"] == "{bad"
+    assert by["c"]["status"] == "crashed" and by["c"]["error"]["type"] == "RuntimeError"
+    assert by["c"]["events"][0]["kind"] == "nav" and by["c"]["events"][0]["status"] == 200
+    assert by["r"]["status"] == "running"
+    assert by["h"]["status"] == "event" and by["h"]["goal"] == "human wait"
+    s = logviz.summary(runs)
+    assert s["time_by_tier"]["local"] == {"total_ms": 9000, "calls": 1, "avg_ms": 9000}
+    assert s["by_status"]["interrupted"] == 1 and s["by_status"]["crashed"] == 1
+
+
+def test_dt_ms_and_no_none_fields():
+    cfg = _cfg()
+    log = StepLog(cfg.log_path, run_id="d")
+    log.write("attempt", tier="local", ok=False, note=None)
+    time.sleep(0.05)
+    log.write("attempt", tier="local", ok=True)
+    recs = [json.loads(line) for line in open(cfg.log_path)]
+    assert "note" not in recs[0]
+    assert recs[1]["dt_ms"] >= 40
 
 
 if __name__ == "__main__":

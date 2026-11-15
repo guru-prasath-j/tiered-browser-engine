@@ -32,6 +32,7 @@ import sys
 import urllib.request
 
 from .llm import Usage, parse_json
+from .logviz import err_text
 from .safety import Blocked
 
 GRID = 100
@@ -267,7 +268,8 @@ class VisionLayer:
                     raise
                 except Exception as e:
                     eng.log.write("attempt", intent=key, tier=name, ok=False, layer=2,
-                                  note=f"vision model unavailable: {str(e).splitlines()[0][:150]}")
+                                  model=getattr(client, "model", None),
+                                  note=f"vision model unavailable: {err_text(e, 200)}")
                     break  # next model
                 if on_usage:
                     on_usage(name, usage)
@@ -277,12 +279,17 @@ class VisionLayer:
                     if not isinstance(d, dict):
                         raise ValueError("not an object")
                 except ValueError as e:
-                    eng.log.write("attempt", intent=key, tier=name, ok=False, note=str(e)[:150], layer=2, **tok)
+                    eng.log.write("attempt", intent=key, tier=name, ok=False, note=str(e)[:150], layer=2,
+                                  model=getattr(client, "model", None), raw=str(raw)[:300], **tok)
                     feedback = "reply with only the JSON object"
                     continue
                 ok, why = self._act(eng, d, value, before, url0, name)
+                seen = None
+                if not ok:  # keep what the model was shown, to see why it misjudged the screen
+                    seen = _save_seen(eng, before, d)
                 eng.log.write("attempt", intent=key, tier=name, ok=ok, layer=2,
-                              model=getattr(client, "model", None),
+                              model=getattr(client, "model", None), seen=seen,
+                              raw=None if ok else str(raw)[:300],
                               action=str(d.get("action", ""))[:20],
                               note=(f'{why} [target: {str(d.get("target") or "")[:60]}'
                                     + (f' at {round(float(d["x"]))},{round(float(d["y"]))}]'
@@ -352,7 +359,7 @@ class VisionLayer:
             elif action == "scroll":
                 page.mouse.wheel(0, int(float(text or 600)))
         except Exception as e:
-            return False, f"{action} raised: {str(e).splitlines()[0][:150]}"
+            return False, f"{action} raised: {err_text(e)}"
         try:
             page.wait_for_load_state("domcontentloaded", timeout=5000)
         except Exception:
@@ -374,6 +381,35 @@ class VisionLayer:
         changed = diff(before, after)
         ok = changed >= cfg.vision_click_diff
         return ok, ("ok (screen changed)" if ok else "screen did not change after the action")
+
+
+def _save_seen(eng, img, d):
+    """Save the grid screenshot the model saw (with its chosen point) for the log viewer."""
+    try:
+        import os
+        import time
+
+        from PIL import ImageDraw
+
+        from .logviz import shots_dir
+
+        if os.getenv("BE_FAIL_SHOTS", "1") == "0":
+            return None
+        out = with_grid(img)
+        xy = coords(d, img.size) if isinstance(d, dict) else None
+        if xy:
+            dr = ImageDraw.Draw(out)
+            x, y = xy
+            dr.ellipse([x - 9, y - 9, x + 9, y + 9], outline=(255, 0, 0), width=3)
+            dr.line([x - 14, y, x + 14, y], fill=(255, 0, 0), width=2)
+            dr.line([x, y - 14, x, y + 14], fill=(255, 0, 0), width=2)
+        d_ = shots_dir(eng.cfg)
+        os.makedirs(d_, exist_ok=True)
+        name = f"{eng.log.run_id}_seen_{int(time.time() * 1000) % 10**8}.jpg"
+        out.save(os.path.join(d_, name), "JPEG", quality=55)
+        return name
+    except Exception:
+        return None
 
 
 def _num(v):

@@ -59,20 +59,26 @@ def settle(page, ms):
 
 def _click(page, loc):
     """Click; if it times out (covered by a sticky bar, off-screen, animating), scroll it into
-    view and retry, then fall back to a DOM click. The verifier still checks the effect."""
+    view and retry, then fall back to a DOM click. The verifier still checks the effect.
+
+    Returns None for a normal click, or a note on how it got through (for the log): a fallback
+    usually means a popup or overlay was covering the target, and the note names it."""
+    from .logviz import err_text
+
     try:
         loc.click(timeout=4000)
-        return
+        return None
     except Exception as first:
         err = first
     try:
         loc.scroll_into_view_if_needed(timeout=2000)
         loc.click(timeout=2500)
-        return
+        return f"clicked after scrolling; first try: {err_text(err, 300)}"
     except Exception:
         pass
     try:
         loc.evaluate("e => e.click()")
+        return f"real click failed, used a DOM click instead: {err_text(err, 300)}"
     except Exception:
         raise err
 
@@ -107,8 +113,9 @@ def _select(page, loc, text):
 
 
 def perform(page, action, loc, text, decision, settle_ms):
+    """Does the action. Returns an optional note on HOW it was done (fallbacks), for the log."""
     if action == "click":
-        _click(page, loc)
+        return _click(page, loc)
     elif action == "type":
         loc.fill(text or "", timeout=5000)
     elif action == "select":
@@ -227,7 +234,9 @@ def verify_ex(page, action, before, loc, text, expect, max_elements):
             ok = loc.evaluate("e => e.files ? e.files.length : 0") > 0
             return ok, "ok" if ok else "no file attached", False
     except Exception as e:
-        return False, f"could not verify: {str(e).splitlines()[0][:120]}", False
+        from .logviz import err_text
+
+        return False, f"could not verify: {err_text(e, 300)}", False
 
     if action in ("scroll", "wait", "navigate"):
         return True, "ok", False
