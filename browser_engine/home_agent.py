@@ -318,12 +318,14 @@ def _same_origin(headers, port):
     return origin is None or origin in {f"http://{h}" for h in allowed_hosts}
 
 
-def build_app(ask, port, info=None):
+def build_app(ask, port, info=None, cfg=None):
     """ask: async (session_id, text) -> (session_id, reply)."""
     from starlette.applications import Starlette
     from starlette.requests import Request
-    from starlette.responses import HTMLResponse, JSONResponse
+    from starlette.responses import FileResponse, HTMLResponse, JSONResponse
     from starlette.routing import Route
+
+    from . import logviz
 
     info = info or {}
 
@@ -365,8 +367,28 @@ def build_app(ask, port, info=None):
             return JSONResponse({"error": ("Something went wrong." + hint).strip()}, status_code=500)
         return JSONResponse({"session_id": sid, "reply": reply})
 
+    async def logs_page(request: Request):
+        if not _same_origin(request.headers, port):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        return HTMLResponse(logviz.PAGE.replace("__API__", "/api/logs").replace("__SHOTS__", "/shots/"))
+
+    async def logs_api(request: Request):
+        if not _same_origin(request.headers, port):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        return JSONResponse(json.loads(json.dumps(logviz.payload(cfg or Config()), default=str)))
+
+    async def shot(request: Request):
+        if not _same_origin(request.headers, port):
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        p = logviz.shot_path(cfg or Config(), request.path_params["name"])
+        if not p:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(p, media_type="image/jpeg")
+
     return Starlette(routes=[Route("/", index), Route("/api/status", status),
-                             Route("/api/chat", chat, methods=["POST"])])
+                             Route("/api/chat", chat, methods=["POST"]),
+                             Route("/logs", logs_page), Route("/api/logs", logs_api),
+                             Route("/shots/{name}", shot)])
 
 
 PAGE = r"""<!doctype html>
@@ -393,7 +415,7 @@ button.send{background:var(--accent);color:#fff;border:0;border-radius:12px;padd
 button:disabled{opacity:.5;cursor:default}
 a{color:var(--accent)}
 </style></head><body>
-<header><h1>Browser Helper</h1><span id="st">runs on this computer</span></header>
+<header><h1>Browser Helper</h1><span id="st">runs on this computer</span><a href="/logs" target="_blank" style="margin-left:auto;font-size:14px">Logs</a></header>
 <div id="log">
   <div class="m bot">Hi! Tell me what to do on the web and I'll do it in the browser window on this computer.
 I'll always ask before I submit, book or send anything, and you type passwords and payments yourself.</div>

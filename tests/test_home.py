@@ -84,6 +84,34 @@ def test_chat_page():
     assert r.status_code == 500 and "free Gemini limit" in r.json()["error"]
 
 
+def test_logs_routes():
+    import tempfile
+
+    from starlette.testclient import TestClient
+
+    from browser_engine.config import Config
+    from browser_engine.engine import StepLog
+
+    os.environ["BE_DATA_DIR"] = tempfile.mkdtemp()
+    cfg = Config()
+    os.makedirs(os.path.join(cfg.data_dir, "shots"))
+    open(os.path.join(cfg.data_dir, "shots", "r_fail_1.jpg"), "wb").write(b"\xff\xd8x")
+    log = StepLog(cfg.log_path, run_id="r")
+    log.write("step", intent="click go", tier=None, ok=False)
+    log.write("shot", file="r_fail_1.jpg", intent="click go")
+    log.write("run", ok=False, goal="demo")
+
+    async def ask(sid, text):
+        return "s", "x"
+
+    c = TestClient(h.build_app(ask, 8770, cfg=cfg), base_url="http://127.0.0.1:8770")
+    assert "Browser Engine Logs" in c.get("/logs").text
+    assert c.get("/api/logs").json()["runs"][0]["steps"][0]["shot"] == "r_fail_1.jpg"
+    assert c.get("/shots/r_fail_1.jpg").content.startswith(b"\xff\xd8")
+    assert c.get("/shots/..%2Fsteps.jsonl").status_code == 404
+    os.environ.pop("BE_DATA_DIR")
+
+
 def test_agent_builds():
     agent = h.build_agent("gemini-2.5-flash")
     names = {getattr(t, "__name__", "") for t in agent.tools}

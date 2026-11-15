@@ -138,8 +138,9 @@ class CallLog:
             rec["error"] = _short(error, 200)
         try:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            from .logviz import append_jsonl
+
+            append_jsonl(self.path, rec)
         except OSError:
             pass  # logging must never break a browser call
         return rec

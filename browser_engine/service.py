@@ -17,6 +17,7 @@ from .observer import observe, page_key
 from .report import print_report, summarize  # noqa: F401  (print_report kept for CLI parity)
 from .popups import PopupMemory
 from .safety import Blocked, Guard
+from . import logviz
 
 STOP = {"the", "a", "an", "to", "into", "in", "on", "of", "and", "for", "click", "type", "select",
         "press", "open", "go", "field", "box", "button", "link", "page", "with", "first", "this"}
@@ -102,6 +103,7 @@ class BrowserService:
         self._local = local
         self._claude = claude
         self._site_memory = None
+        logviz.maybe_prune(self.cfg)
 
     # ---- wiring ----------------------------------------------------------
     def _get_local(self):
@@ -219,6 +221,7 @@ class BrowserService:
 
     def _run_plan(self, goal, steps, start_url=None, confirm_irreversible=False):
         steps = normalize_steps(steps)
+        logviz.maybe_prune(self.cfg)
         page = self._get_page()
         log = StepLog(self.cfg.log_path)
         eng = self._engine(page, log, confirm_irreversible)
@@ -231,6 +234,8 @@ class BrowserService:
                 eng.do_step(st["intent"], st["value"])
                 done += 1
         except HumanNeeded as e:
+            self._failure_shot(page, log, steps[done]["intent"] if done < len(steps) else None,
+                               reason="bot check", error=e.reason)
             log.write("run", ok=False, goal=goal, completed=done, needs_human=True,
                       tiers=dict(eng.tiers_used), claude_tokens=eng.claude_tokens)
             return {
@@ -249,8 +254,11 @@ class BrowserService:
             }
         except (Blocked, StepFailed, BudgetExceeded) as e:
             failed = steps[done]
-            self.last_obs = observe(page, self.cfg.max_elements)
             blocked = isinstance(e, Blocked)
+            self._failure_shot(page, log, failed["intent"],
+                               reason="blocked (needs approval)" if blocked else type(e).__name__,
+                               error=str(e))
+            self.last_obs = observe(page, self.cfg.max_elements)
             log.write("run", ok=False, goal=goal, completed=done, blocked=blocked,
                       tiers=dict(eng.tiers_used), claude_tokens=eng.claude_tokens)
             return _prune({
@@ -282,6 +290,18 @@ class BrowserService:
             "url": page.url,
             "title": page.title(),
         })
+
+    def _failure_shot(self, page, log, intent, reason=None, error=None):
+        """Screenshot + 'shot' log line at the moment a step fails (shown in `browser-engine logs`)."""
+        if os.getenv("BE_FAIL_SHOTS", "1") == "0":
+            return
+        name = logviz.save_failure_shot(page, self.cfg, log.run_id)
+        try:
+            url = page.url[:300]
+        except Exception:
+            url = None
+        log.write("shot", file=name, intent=intent, url=url, reason=reason,
+                  error=(error or "")[:300] or None)
 
     def wait_human(self, timeout_s=50, resume_url=None):
         """Wait for the user to clear a bot check, then optionally reopen resume_url."""
@@ -329,7 +349,9 @@ class BrowserService:
             d, p = page_key(obs.url)
             self.cache.put(d, p, norm_intent(intent), entry)
             learned = True
-        log.write("step", intent=norm_intent(intent), tier="manual", ok=ok, note=why)
+        log.write("step", intent=norm_intent(intent), tier="manual", ok=ok, note=why, url=page.url[:300])
+        if not ok:
+            self._failure_shot(page, log, norm_intent(intent), reason="manual step failed", error=why)
         out = {"ok": ok, "note": why, "learned": learned, "url": page.url}
         if eng.extracted:
             out["extracted"] = eng.extracted

@@ -42,9 +42,13 @@ class StepLog:
         self.run_id = run_id or uuid.uuid4().hex[:10]
 
     def write(self, kind, **fields):
+        from .logviz import append_jsonl
+
         rec = {"ts": round(time.time(), 3), "run_id": self.run_id, "kind": kind, **fields}
-        with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        try:
+            append_jsonl(self.path, rec)
+        except OSError:
+            pass  # logging must never break a run
 
 
 def plan_key(goal, start_url):
@@ -224,7 +228,8 @@ class Engine:
                     return self._done(key, tier, t0)
                 feedback = f"last action ({action} {decision.get('ref') or ''}) failed: {why}"
 
-        self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000))
+        self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000),
+                       url=self._url(), note=(feedback or "")[:300] or None)
         raise StepFailed(f"could not complete step '{intent}': {feedback}")
 
     def before_step(self):
@@ -386,5 +391,12 @@ class Engine:
 
     def _done(self, key, tier, t0):
         self.tiers_used[tier] += 1
-        self.log.write("step", intent=key, tier=tier, ok=True, ms=int((time.time() - t0) * 1000))
+        self.log.write("step", intent=key, tier=tier, ok=True, ms=int((time.time() - t0) * 1000),
+                       url=self._url())
         return tier
+
+    def _url(self):
+        try:
+            return self.page.url[:300]
+        except Exception:
+            return None

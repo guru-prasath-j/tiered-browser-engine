@@ -33,6 +33,8 @@ window you can watch, then replies in the chat.
 - **Sites where you have an account:** when it asks, sign in yourself in that browser window, then type
   `done` in the chat. You stay signed in next time.
 - **"I'm not a robot" checks:** solve them in the browser window; it waits for you.
+- To see what happened step by step (and where something failed), click **Logs** at the top of the chat page.
+  Logs are deleted automatically after 24 hours.
 - To stop, close the small window (or press Ctrl+C in it).
 
 ## If something goes wrong

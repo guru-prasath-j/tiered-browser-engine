@@ -216,6 +216,26 @@ Environment variables: `BE_LOCAL_BASE_URL`, `BE_LOCAL_MODEL`, `BE_CLAUDE_TEXT_MO
 | `guest.py` | Guest mode for remote callers: isolated browser, URL policy, login-wall stop. |
 | `a2a_agent.py` | Google ADK agent + A2A server with bearer auth. |
 
+## Visual logs: see exactly where a run failed (v0.9)
+
+```bash
+browser-engine logs            # opens http://127.0.0.1:8772  (Browser Helper: the "Logs" link, /logs)
+browser-engine logs --prune    # just delete logs older than 24h
+```
+
+Every run is shown with its goal and steps in order. Each step shows the chain of tiers it went
+through (rule → cache → label match → local LLM → Claude …), with the reason every failed attempt
+gave. The step that broke the run is marked red with the page URL and a **screenshot taken at the
+moment it failed** (bot checks and blocked/irreversible steps too). Filters: Failed, Retried
+(succeeded only after a failed attempt), Needs you (bot check). It also shows "Where failures happen
+most", tier mix and token use. The page refreshes every 10 s.
+
+**24-hour retention:** `steps.jsonl`, `calls.jsonl` and failure screenshots (`~/.browser_engine/shots/`)
+older than 24 hours are deleted when the engine starts, every 10 minutes while it runs, and whenever the
+log page loads. Each run shows its own countdown ("deleted in 3.2h"). Env: `BE_LOG_RETENTION_HOURS`
+(default 24), `BE_FAIL_SHOTS=0` to turn screenshots off. Log writes use a file lock, so pruning never
+drops lines another process (MCP server, Browser Helper) is writing. The page listens on 127.0.0.1 only.
+
 ## Use it yourself, or give it to a non-technical person: Browser Helper (v0.8)
 
 `browser-engine-home` is a personal agent (Google ADK) with a local chat page at http://127.0.0.1:8770.
@@ -303,6 +323,7 @@ The observer does not look inside iframes or shadow DOM yet, so those pages fall
 
 ```bash
 python tests/test_engine.py && python tests/test_mcp.py && python tests/test_extract.py
+python tests/test_logviz.py  # visual logs: 24h pruning, run grouping, viewer server
 python tests/test_home.py    # home agent chat page, settings, model choice (needs .[home])
 python tests/test_guest.py   # popups, guest mode, A2A server (needs .[a2a])
 ```

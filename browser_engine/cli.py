@@ -91,6 +91,16 @@ def cmd_calls(args, cfg):
     return 0
 
 
+def cmd_logs(args, cfg):
+    from . import logviz
+
+    if args.prune:
+        print(json.dumps({"deleted": logviz.prune(cfg)}))
+        return 0
+    logviz.serve(cfg, args.port, open_browser=not args.no_open)
+    return 0
+
+
 def cmd_cache(args, cfg):
     cache = ActionCache(cfg.cache_path)
     if args.op == "clear":
@@ -134,6 +144,11 @@ def main(argv=None):
     cl = sub.add_parser("calls", help="raw JSON lines of recent tool calls")
     cl.add_argument("--last", type=int, default=20)
 
+    lg = sub.add_parser("logs", help="visual log viewer: runs, retries, failures (last 24h)")
+    lg.add_argument("--port", type=int, default=8772)
+    lg.add_argument("--no-open", action="store_true", help="don't open the browser")
+    lg.add_argument("--prune", action="store_true", help="only delete logs older than 24h, then exit")
+
     c = sub.add_parser("cache", help="inspect or clear the action cache")
     c.add_argument("op", choices=["list", "clear"])
     c.add_argument("--domain")
@@ -142,7 +157,7 @@ def main(argv=None):
     cfg = Config()
     os.makedirs(cfg.data_dir, exist_ok=True)
     return {"run": cmd_run, "report": cmd_report, "usage": cmd_usage, "calls": cmd_calls,
-            "cache": cmd_cache}[args.cmd](args, cfg)
+            "cache": cmd_cache, "logs": cmd_logs}[args.cmd](args, cfg)
 
 
 if __name__ == "__main__":
