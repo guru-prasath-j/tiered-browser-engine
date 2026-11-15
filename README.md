@@ -308,7 +308,10 @@ browser-engine-home             # or double-click "Browser Helper" on the Deskto
 browser-engine-home --set-key   # change the Gemini key (stored in ~/.browser_engine/home.env, mode 600)
 ```
 
-Plain-language guide for someone else: [HOME_SETUP.md](HOME_SETUP.md). Env: `BE_HOME_MODEL` (any
+Browser Helper runs the full engine: **layer 1** (reads the page: cache → label match → local LLM) and
+**layer 2** (local vision model on screenshots). At start it prints which layers are on, the chat page
+shows "screenshots: on/off", and the installers offer to pull `qwen2.5:7b` + `qwen2.5vl:7b` when Ollama
+is installed. Plain-language guide for someone else: [HOME_SETUP.md](HOME_SETUP.md). Env: `BE_HOME_MODEL` (any
 LiteLLM id), `BE_HOME_PORT`.
 
 ## Share it as an A2A agent (Google ADK)

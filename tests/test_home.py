@@ -112,6 +112,17 @@ def test_logs_routes():
     os.environ.pop("BE_DATA_DIR")
 
 
+def test_layer_status():
+    st = h.layer_status(local_up=False)
+    assert st["layer2"].startswith("off") and "ollama pull" in st["hints"][0]
+    os.environ["BE_LOCAL_BASE_URL"] = "http://127.0.0.1:9/v1"  # Ollama "up" but no models listed
+    try:
+        st = h.layer_status(local_up=True)
+    finally:
+        os.environ.pop("BE_LOCAL_BASE_URL")
+    assert st["layer2"] == "off" and any("qwen2.5vl" in x for x in st["hints"]), st
+
+
 def test_agent_builds():
     agent = h.build_agent("gemini-2.5-flash")
     names = {getattr(t, "__name__", "") for t in agent.tools}

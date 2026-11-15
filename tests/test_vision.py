@@ -189,6 +189,50 @@ def run(page):
     print("ok no layer 2 configured")
 
 
+def run_agent_flow():
+    """Browser Helper's own tools (home_agent) go through BOTH layers of the same engine.
+    The agent runs every browser call on its own worker thread, so the browser opens there."""
+    import asyncio
+
+    from browser_engine import home_agent
+    from browser_engine.service import BrowserService
+
+    held = {}
+
+    def make_page():  # called on the agent's browser thread
+        held["pw"] = sync_playwright().start()
+        held["b"] = held["pw"].chromium.launch()
+        return held["b"].new_page(viewport={"width": 800, "height": 600})
+
+    svc = home_agent._pool.submit(lambda: BrowserService(page_factory=make_page)).result()
+    m = Scripted({"action": "click", "x": 400, "y": 190, "target": "Search"})
+    svc._vision = vision.VisionLayer([("vision_local", m)], tries=1)
+    old = home_agent._svc
+    home_agent._svc = svc
+    try:
+        # layer 1: a normal button, found by its label, no model at all
+        normal = "<html><body><button onclick=\"this.textContent='Done'\">Search flights</button></body></html>"
+        import base64
+
+        url = "data:text/html;base64," + base64.b64encode(normal.encode()).decode()
+        r1 = asyncio.run(home_agent.run_browser_plan("search", ["click Search flights"], url))
+        assert r1["ok"] and r1["tiers"] == {"match": 1}, r1
+        # layer 2: a canvas page with nothing to read in the HTML
+        url = "data:text/html;base64," + base64.b64encode(CANVAS.encode()).decode()
+        r2 = asyncio.run(home_agent.run_browser_plan("search", ["click the Search button"], url))
+        assert r2["ok"] and r2["tiers"] == {"vision_local": 1}, r2
+    finally:
+        home_agent._svc = old
+
+        def close():
+            if "b" in held:
+                held["b"].close()
+                held["pw"].stop()
+
+        home_agent._pool.submit(close).result()
+    print("ok Browser Helper agent uses layer 1 and layer 2")
+
+
 def test_coords():
     assert vision.coords({"x": 10, "y": 20}, (800, 600)) == (10.0, 20.0)
     assert vision.coords({"x": 0.5, "y": 0.25}, (800, 600)) == (400.0, 150.0)
@@ -262,3 +306,4 @@ if __name__ == "__main__":
             run(page)
         finally:
             b.close()
+    run_agent_flow()

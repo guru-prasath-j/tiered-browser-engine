@@ -29,6 +29,17 @@ if (-not ((Test-Path $envFile) -and (Select-String -Path $envFile -Pattern '^GOO
   & (Join-Path $PSScriptRoot ".venv\Scripts\browser-engine-home.exe") --set-key
 }
 
+# Free local models: layer 1 (reads pages) and layer 2 (looks at screenshots)
+Write-Host ""
+if (Get-Command ollama -ErrorAction SilentlyContinue) {
+  $a = Read-Host "Download the free local AI models for both layers (about 11 GB, one time)? [y/N]"
+  if ($a -match '^(y|yes)$') { ollama pull qwen2.5:7b; ollama pull qwen2.5vl:7b }
+  else { Write-Host "Skipped. Later: ollama pull qwen2.5:7b ; ollama pull qwen2.5vl:7b" }
+} else {
+  Write-Host "Tip: install Ollama (https://ollama.com) and run 'ollama pull qwen2.5:7b' and 'ollama pull qwen2.5vl:7b'"
+  Write-Host "     so the helper works on your computer for free and can read websites from screenshots."
+}
+
 $desk = [Environment]::GetFolderPath("Desktop")
 $bat = Join-Path $desk "Browser Helper.bat"
 "@echo off`r`ncd /d `"$PSScriptRoot`"`r`n.venv\Scripts\browser-engine-home.exe`r`npause" | Set-Content -Encoding ASCII $bat

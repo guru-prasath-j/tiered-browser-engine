@@ -46,7 +46,21 @@ window you can watch, then replies in the chat.
 | "Could not reach the helper" | The small window was closed: double-click Browser Helper on the Desktop again |
 | Chat page doesn't open | Open http://127.0.0.1:8770 in your browser |
 
-Optional: with [Ollama](https://ollama.com) installed and `ollama pull qwen2.5:7b`, small steps run on
-your computer for free and the Gemini key is used less. `ollama pull qwen2.5vl:7b` adds a free local
-"eyes" model too: when a website can't be read normally, the helper looks at a screenshot of it instead.
-This only ever uses the model on your computer, never an online one.
+## Recommended: free local models (both layers)
+
+The helper reads websites in two layers:
+
+1. **Reads the page** (fast): remembered steps, button labels, and a small local model.
+2. **Looks at a screenshot** (when a site can't be read normally): a local "eyes" model.
+
+Both run on your own computer, for free. Install [Ollama](https://ollama.com), then run once:
+
+```
+ollama pull qwen2.5:7b
+ollama pull qwen2.5vl:7b
+```
+
+(The installer offers to do this for you if Ollama is already installed. It's about 11 GB, and a computer
+with 16 GB of memory or more works best.) Without them the helper still works, using Gemini for its
+thinking, but it can't look at screenshots. The black window shows which layers are on when it starts,
+and the chat page shows "screenshots: on" or "off" at the top.

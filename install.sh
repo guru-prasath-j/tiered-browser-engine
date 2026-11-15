@@ -30,6 +30,20 @@ if ! grep -qs '^GOOGLE_API_KEY=' "$HOME/.browser_engine/home.env"; then
   .venv/bin/browser-engine-home --set-key || true
 fi
 
+# Free local models: layer 1 (reads pages) and layer 2 (looks at screenshots)
+echo
+if command -v ollama >/dev/null 2>&1; then
+  a=n
+  read -r -p "Download the free local AI models for both layers (about 11 GB, one time)? [y/N] " a </dev/tty || a=n
+  case "$a" in
+    y|Y|yes|YES) ollama pull qwen2.5:7b && ollama pull qwen2.5vl:7b || echo "Model download failed; you can retry later with: ollama pull qwen2.5:7b && ollama pull qwen2.5vl:7b" ;;
+    *) echo "Skipped. Later: ollama pull qwen2.5:7b && ollama pull qwen2.5vl:7b" ;;
+  esac
+else
+  echo "Tip: install Ollama (https://ollama.com) and run 'ollama pull qwen2.5:7b && ollama pull qwen2.5vl:7b'"
+  echo "     so the helper works on your computer for free and can read websites from screenshots."
+fi
+
 # Double-clickable launcher
 if [ "$(uname)" = "Darwin" ]; then
   L="$HOME/Desktop/Browser Helper.command"
