@@ -1,4 +1,9 @@
-"""The tiered engine: cache -> local LLM -> Claude text -> Claude vision."""
+"""The tiered engine.
+
+Layer 1 (reads the page's elements): rule -> cache -> label match -> local LLM -> Claude text/vision.
+Layer 2 (vision.py, screenshots only): local vision model -> Gemini -> Claude. Runs when layer 1
+gives up on a step, or straight away when the page has no readable elements.
+"""
 import base64
 import re
 import hashlib
@@ -17,7 +22,7 @@ from .llm import Usage, parse_json
 from .observer import observe, page_key
 from .safety import describe
 
-CLAUDE_TIERS = {"planner", "claude_text", "claude_vision"}
+CLAUDE_TIERS = {"planner", "claude_text", "claude_vision", "vision_claude"}
 
 
 class StepFailed(Exception):
@@ -73,8 +78,10 @@ def normalize_steps(steps):
 class Engine:
     guest_popups = False  # GuestEngine also clicks "continue as guest"
 
-    def __init__(self, page, cfg, cache, log, local=None, claude=None, guard=None, popups=None):
+    def __init__(self, page, cfg, cache, log, local=None, claude=None, guard=None, popups=None,
+                 vision=None):
         self.page, self.cfg, self.cache, self.log = page, cfg, cache, log
+        self.vision = vision         # vision.VisionLayer (layer 2), or None
         self.local, self.claude, self.guard = local, claude, guard
         self.popups = popups         # PopupMemory, or None to never touch popups
         self.popups_closed = []      # labels clicked this run, returned to the caller
@@ -116,7 +123,24 @@ class Engine:
         self.human_gate()
         self.before_step()
         t0 = time.time()
-        before = observe(self.page, self.cfg.max_elements)
+        try:
+            before = observe(self.page, self.cfg.max_elements)
+            blind = not before.elements
+        except Exception as e:
+            before, blind = None, True
+            self.log.write("attempt", intent=key, tier="dom", ok=False,
+                           note=f"page elements unreadable: {str(e).splitlines()[0][:150]}")
+        if blind and self.vision and not key.startswith("answer"):
+            # Nothing to read in the HTML (canvas, blocked scripts, shadow DOM...): go to layer 2.
+            tier = self._vision(key, intent, value, "the page shows no readable elements")
+            if tier:
+                return self._done(key, tier, t0)
+            self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000),
+                           url=self._url(), note="no readable elements and the screenshot layer failed")
+            raise StepFailed(f"could not complete step '{intent}': page has no readable elements and "
+                             "the screenshot layer could not do it")
+        if before is None:
+            before = observe(self.page, self.cfg.max_elements)  # raise the real error
         domain, pkey = page_key(before.url)
         feedback = None
 
@@ -228,6 +252,10 @@ class Engine:
                     return self._done(key, tier, t0)
                 feedback = f"last action ({action} {decision.get('ref') or ''}) failed: {why}"
 
+        if self.vision:
+            tier = self._vision(key, intent, value, feedback)
+            if tier:
+                return self._done(key, tier, t0)
         self.log.write("step", intent=key, tier=None, ok=False, ms=int((time.time() - t0) * 1000),
                        url=self._url(), note=(feedback or "")[:300] or None)
         raise StepFailed(f"could not complete step '{intent}': {feedback}")
@@ -388,6 +416,16 @@ class Engine:
     def _check_budget(self):
         if self.claude_tokens >= self.cfg.max_claude_tokens:
             raise BudgetExceeded(f"Claude token budget reached ({self.claude_tokens}/{self.cfg.max_claude_tokens})")
+
+    def _vision(self, key, intent, value, feedback):
+        """Layer 2: the same step from screenshots only. Returns the tier name or None."""
+        def on_usage(tier, usage):
+            if tier in CLAUDE_TIERS:
+                self._check_budget()
+            self._account(tier, usage)
+
+        self.log.write("layer", intent=key, note=f"layer 2 (screenshots): {feedback or 'layer 1 failed'}"[:300])
+        return self.vision.run(self, key, intent, value, feedback, on_usage=on_usage)
 
     def _done(self, key, tier, t0):
         self.tiers_used[tier] += 1

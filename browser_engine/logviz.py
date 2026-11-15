@@ -171,16 +171,16 @@ def build_runs(cfg, now=None):
         kind = r.get("kind")
         if kind == "attempt":
             run["pending"].append({k: r.get(k) for k in ("ts", "tier", "ok", "action", "note",
-                                                         "tokens_in", "tokens_out")})
+                                                         "tokens_in", "tokens_out", "layer")})
             tok = (r.get("tokens_in") or 0) + (r.get("tokens_out") or 0)
             if r.get("tier") == "local":
                 run["local_tokens"] += tok
-            elif r.get("tier") in ("planner", "claude_text", "claude_vision"):
+            elif r.get("tier") in ("planner", "claude_text", "claude_vision", "vision_claude"):
                 run["claude_tokens"] += tok
         elif kind == "step":
             attempts = run["pending"]
             run["pending"] = []
-            fails = sum(1 for a in attempts if not a.get("ok"))
+            fails = sum(1 for a in attempts if a.get("ok") is False)
             run["steps"].append({"ts": r["ts"], "intent": r.get("intent"), "ok": bool(r.get("ok")),
                                  "tier": r.get("tier"), "ms": r.get("ms"), "url": r.get("url"),
                                  "note": r.get("note"), "attempts": attempts,
@@ -208,6 +208,8 @@ def build_runs(cfg, now=None):
                 run["status"] = "blocked"
             else:
                 run["status"] = "failed"
+        elif kind == "layer":
+            run["pending"].append({"ts": r["ts"], "tier": "layer2", "ok": None, "note": r.get("note")})
         elif kind == "plan":
             run["plan"] = r.get("tier")
         else:
@@ -254,6 +256,7 @@ def summary(runs):
     return {"runs": len(runs), "by_status": by_status, "steps": len(steps),
             "steps_failed": sum(1 for s in steps if not s["ok"]),
             "steps_retried": sum(1 for s in steps if s.get("retried")),
+            "steps_layer2": sum(1 for s in steps if s["ok"] and str(s.get("tier") or "").startswith("vision")),
             "tiers": tiers,
             "top_failures": sorted(fail_spots.items(), key=lambda kv: -kv[1])[:5],
             "retention_hours": round(retention_s() / 3600, 2)}
@@ -369,6 +372,7 @@ input[type=search]{border:1px solid var(--line);background:var(--card);color:var
 .a{font-size:12px;border-radius:6px;padding:1px 7px;background:var(--chip);border:1px solid transparent;cursor:default}
 .a.ok{background:var(--okbg);color:var(--ok)}.a.bad{background:var(--badbg);color:var(--bad)}
 .arrow{color:var(--muted);font-size:11px}
+.lay{font-size:11px;font-weight:600;letter-spacing:.02em;color:var(--info);background:var(--infobg);border-radius:6px;padding:1px 7px}
 .why{margin-top:6px;font-size:12.5px;color:var(--muted)}
 .why li{margin:2px 0;word-break:break-word}.why b{color:var(--ink);font-weight:600}
 .failbox{margin-top:8px;border:1px solid var(--bad);background:var(--badbg);border-radius:8px;padding:8px 10px}
@@ -396,7 +400,7 @@ dialog::backdrop{background:rgba(0,0,0,.75)}
 <dialog id="dlg"><img id="big" alt=""></dialog>
 <script>
 const API='__API__',SHOTS='__SHOTS__';let data=null,filter='all',open=new Set();
-const TIER={rule:'rule',cache:'cache',match:'label match',local:'local LLM',claude_text:'Claude text',claude_vision:'Claude vision',manual:'manual (agent)',planner:'planner'};
+const TIER={rule:'rule',cache:'cache',match:'label match',local:'local LLM',claude_text:'Claude text',claude_vision:'Claude vision',manual:'manual (agent)',planner:'planner',dom:'read page',vision_local:'📷 local vision',vision_gemini:'📷 Gemini vision',vision_claude:'📷 Claude vision'};
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const t=ts=>new Date(ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
 const ago=s=>s<60?Math.round(s)+'s':s<3600?Math.round(s/60)+'m':(s/3600).toFixed(1)+'h';
@@ -406,7 +410,8 @@ function tiles(){const s=data.summary,st=s.by_status;
  const top=Object.entries(s.tiers).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${TIER[k]||k} ${v}`).join(' · ')||'–';
  document.getElementById('tiles').innerHTML=[
   [s.runs,'runs (last '+s.retention_hours+'h)'],[rate,'runs succeeded'],[(st.failed||0)+(st.blocked||0),'runs failed / blocked'],
-  [st.needs_human||0,'stopped for a bot check'],[s.steps_failed,'steps failed'],[s.steps_retried,'steps that needed a retry']]
+  [st.needs_human||0,'stopped for a bot check'],[s.steps_failed,'steps failed'],[s.steps_retried,'steps that needed a retry'],
+  [s.steps_layer2||0,'steps solved from screenshots']]
   .map(([v,l])=>`<div class="tile"><b>${v}</b><span>${l}</span></div>`).join('')+
   `<div class="tile" style="grid-column:1/-1"><span>Steps solved by tier</span><div style="margin-top:3px">${esc(top)}</div></div>`;
  const hot=document.getElementById('hot');
@@ -414,10 +419,10 @@ function tiles(){const s=data.summary,st=s.by_status;
  else hot.hidden=true;
  document.getElementById('ret').textContent='logs older than '+s.retention_hours+'h are deleted automatically'}
 function chain(st){if(!st.attempts.length)return st.tier?`<span class="a ok">${esc(TIER[st.tier]||st.tier)}</span>`:'';
- return st.attempts.map(a=>{const tok=(a.tokens_in||0)+(a.tokens_out||0);
+ return st.attempts.map(a=>{if(a.tier==='layer2')return '<span class="lay" title="'+esc(a.note||'')+'">layer 2: screenshots</span>';const tok=(a.tokens_in||0)+(a.tokens_out||0);
   return `<span class="a ${a.ok?'ok':'bad'}" title="${esc((a.action?a.action+': ':'')+(a.note||''))}">${a.ok?'✓':'✗'} ${esc(TIER[a.tier]||a.tier)}${tok?` · ${tok} tok`:''}</span>`}).join('<span class="arrow">→</span>')}
 function step(st,i){const bad=!st.ok, cls=bad?'bad':st.retried?'retry':'ok';
- const fails=st.attempts.filter(a=>!a.ok&&a.note);
+ const fails=st.attempts.filter(a=>a.ok===false&&a.note);
  let why='';if(fails.length&&(bad||st.retried))why='<ul class="why">'+fails.map(a=>`<li><b>${esc(TIER[a.tier]||a.tier)}</b>${a.action?' ('+esc(a.action)+')':''}: ${esc(a.note)}</li>`).join('')+'</ul>';
  let box='';if(bad){box=`<div class="failbox"><b>${st.unfinished?'Stopped during this step':'Failed here'}</b>${st.reason?' — '+esc(st.reason):''}${st.error?'<div>'+esc(st.error)+'</div>':''}${st.url?`<div class="u">${esc(st.url)}</div>`:''}${st.shot?`<img loading="lazy" src="${SHOTS+encodeURIComponent(st.shot)}" alt="page when it failed">`:''}</div>`}
  const label=st.intent?esc(st.intent):'<i>unknown step</i>';

@@ -47,4 +47,6 @@ window you can watch, then replies in the chat.
 | Chat page doesn't open | Open http://127.0.0.1:8770 in your browser |
 
 Optional: with [Ollama](https://ollama.com) installed and `ollama pull qwen2.5:7b`, small steps run on
-your computer for free and the Gemini key is used less.
+your computer for free and the Gemini key is used less. `ollama pull qwen2.5vl:7b` adds a free local
+"eyes" model too: when a website can't be read normally, the helper looks at a screenshot of it instead
+(Gemini does this as well).

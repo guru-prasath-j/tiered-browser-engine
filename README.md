@@ -216,6 +216,39 @@ Environment variables: `BE_LOCAL_BASE_URL`, `BE_LOCAL_MODEL`, `BE_CLAUDE_TEXT_MO
 | `guest.py` | Guest mode for remote callers: isolated browser, URL policy, login-wall stop. |
 | `a2a_agent.py` | Google ADK agent + A2A server with bearer auth. |
 
+## Two layers: page elements first, screenshots second (v0.10)
+
+| Layer | Reads | Tiers, cheapest first |
+|---|---|---|
+| **1. Elements** | the page's HTML elements | rule → cache → label match → local LLM (Ollama) → Claude text/vision (paid, opt-in) |
+| **2. Screenshots** | only pixels | 📷 local vision model (Ollama) → 📷 Gemini (free tier) → 📷 Claude (paid, opt-in) |
+
+Layer 1 is cheap and precise but needs readable elements. Some pages hide their structure: canvas
+apps, closed shadow DOM, cross-origin iframes, randomised/obfuscated markup, or anti-bot scripts that
+break element reading. Layer 2 handles those by looking at the screen like a person:
+
+1. Viewport screenshot with a faint 100-px coordinate grid → vision model.
+2. The model answers `{"action": "click|type|press|scroll|extract|done|fail", "x", "y", "target", "field"}`.
+3. The engine moves the mouse there (hover first), clicks or types, and **verifies by pixels**: the URL
+   changed, or a 32×32 block of the screen changed (around the field for typing). Hover highlights
+   don't count.
+4. On failure the next try gets the reason as feedback; then the next model.
+
+Layer 2 runs when layer 1 gives up on a step, or **straight away** when the page shows no readable
+elements. "read …" steps return text the model copies from the screenshot (`"source": "screenshot"`),
+so data can be read even when the HTML can't.
+
+Safety is the same in both layers: the model must name the `target` and `field` kind, password/OTP/card
+fields are refused, and irreversible clicks (pay, submit, send, apply…) still need the user's yes.
+Coordinates are never cached; successful layer-1 actions still are.
+
+Setup: `ollama pull qwen2.5vl:7b` (free, local) and/or a Gemini key (`GOOGLE_API_KEY` or
+`GEMINI_API_KEY`). Env: `BE_VISION=0` (layer off), `BE_VISION_LOCAL=0`, `BE_VISION_GEMINI=0`,
+`BE_VISION_LOCAL_MODEL`, `BE_VISION_GEMINI_MODEL`, `BE_VISION_TRIES` (default 2 per model),
+`BE_VISION_CLICK_DIFF` / `BE_VISION_TYPE_DIFF` (pixel-change thresholds, default 6). Guest mode (A2A)
+only uses the local vision model, never your API keys. In the log viewer, layer 2 shows as
+"layer 2: screenshots" followed by 📷 tiers. `browser_status` lists the active vision models.
+
 ## Visual logs: see exactly where a run failed (v0.9)
 
 ```bash
@@ -323,6 +356,7 @@ The observer does not look inside iframes or shadow DOM yet, so those pages fall
 
 ```bash
 python tests/test_engine.py && python tests/test_mcp.py && python tests/test_extract.py
+python tests/test_vision.py   # layer 2: blind pages, retries, typing, reading, guard (real Chromium)
 python tests/test_logviz.py  # visual logs: 24h pruning, run grouping, viewer server
 python tests/test_home.py    # home agent chat page, settings, model choice (needs .[home])
 python tests/test_guest.py   # popups, guest mode, A2A server (needs .[a2a])

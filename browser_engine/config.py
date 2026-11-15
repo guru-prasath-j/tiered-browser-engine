@@ -24,6 +24,15 @@ class Config:
     claude_text_tries: int = 2
     vision_tries: int = 1
 
+    # Layer 2 (vision.py): decide from screenshots when the HTML can't be read or layer 1 gave up
+    vision_local_model: str = field(default_factory=lambda: _env("BE_VISION_LOCAL_MODEL", "qwen2.5vl:7b"))
+    vision_gemini_model: str = field(default_factory=lambda: _env("BE_VISION_GEMINI_MODEL", "gemini-2.5-flash"))
+    vision_layer_tries: int = field(default_factory=lambda: int(_env("BE_VISION_TRIES", "2")))
+    # Screen change that counts as "the click / typing worked": the largest mean pixel difference
+    # (0-255) of any 32x32 block between the screenshots before and after (vision.diff)
+    vision_click_diff: float = field(default_factory=lambda: float(_env("BE_VISION_CLICK_DIFF", "6")))
+    vision_type_diff: float = field(default_factory=lambda: float(_env("BE_VISION_TYPE_DIFF", "6")))
+
     # Hard cap on Claude tokens per run (planner + escalations)
     max_claude_tokens: int = 60_000
 

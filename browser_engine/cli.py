@@ -48,8 +48,12 @@ def cmd_run(args, cfg):
 
     with sync_playwright() as pw:
         page, close = _open_page(pw, args, cfg)
+        from .vision import VisionLayer, providers
+
+        vision = VisionLayer(providers(cfg), cfg.vision_layer_tries)
         engine = Engine(page, cfg, cache, log, local=local, claude=claude,
-                        guard=Guard(confirm_irreversible=args.confirm_irreversible))
+                        guard=Guard(confirm_irreversible=args.confirm_irreversible),
+                        vision=vision or None)
         try:
             print(json.dumps(engine.run(args.goal, start_url=args.url, plan=plan), indent=2))
             return 0

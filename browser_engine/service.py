@@ -103,6 +103,7 @@ class BrowserService:
         self._local = local
         self._claude = claude
         self._site_memory = None
+        self._vision = None if os.getenv("BE_VISION") != "0" else False
         logviz.maybe_prune(self.cfg)
 
     # ---- wiring ----------------------------------------------------------
@@ -170,9 +171,22 @@ class BrowserService:
             self.page = ctx.pages[0] if ctx.pages else ctx.new_page()
         return self.page
 
+    def _get_vision(self):
+        """Layer 2 (screenshots). Built once: probing which vision models exist costs a request."""
+        if self._vision is None:
+            from .vision import VisionLayer, providers
+
+            try:
+                self._vision = VisionLayer(providers(self.cfg), self.cfg.vision_layer_tries)
+            except Exception as e:
+                print(f"[browser-engine] screenshot layer disabled: {e}", file=sys.stderr)
+                self._vision = False
+        return self._vision or None
+
     def _engine(self, page, log, confirm_irreversible):
         return Engine(page, self.cfg, self.cache, log, local=self._get_local(),
-                      claude=self._get_claude(), guard=Guard(confirm_irreversible), popups=self.popups)
+                      claude=self._get_claude(), guard=Guard(confirm_irreversible), popups=self.popups,
+                      vision=self._get_vision())
 
     # ---- tools -----------------------------------------------------------
     def status(self):
@@ -189,6 +203,7 @@ class BrowserService:
             "local_llm": {"url": self.cfg.local_base_url, "model": self.cfg.local_model, "reachable": local_ok},
             "chrome_cdp": {"url": self.cdp, "reachable": chrome_ok},
             "claude_api_tier": os.getenv("BE_ALLOW_CLAUDE_API") == "1",
+            "screenshot_layer": (self._get_vision().names() if self._get_vision() else []),
             "cached_actions": len(self.cache.list()),
             "saved_tasks": [r[0] for r in self.cache.list_tasks()[:20]],
             "hints": hints,
